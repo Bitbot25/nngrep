@@ -1,12 +1,9 @@
 /// Maximum number of lines in a chunk
-pub const MAX_LINES: usize = 40;
+pub const MAX_LINES: usize = 20;
 
 /// Maximum size of a chunk's text in bytes. Keeps every chunk well below the
 /// embedding server's per-sequence context, since a token is at least one byte.
-pub const MAX_BYTES: usize = 1500;
-
-/// Number of lines shared by consecutive chunks
-const OVERLAP: usize = 3;
+pub const MAX_BYTES: usize = 900;
 
 /// A piece of a text file to be embedded.
 pub struct Chunk {
@@ -17,8 +14,9 @@ pub struct Chunk {
     pub text: String,
 }
 
-/// Splits text into overlapping chunks of whole lines. Whitespace-only chunks
-/// are dropped and over-long lines are truncated.
+/// Splits text into chunks of whole lines. A chunk that hits a size limit ends
+/// at its last blank line, if one falls in its second half. Whitespace-only
+/// chunks are dropped and over-long lines are truncated.
 pub fn chunk_text(text: &str) -> Vec<Chunk> {
     let lines: Vec<&str> = text.lines().collect();
     let mut chunks = Vec::new();
@@ -34,6 +32,13 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
             bytes += len;
             end += 1;
         }
+        if end < lines.len()
+            && let Some(blank) = (start + (end - start) / 2..end)
+                .rev()
+                .find(|&i| lines[i].trim().is_empty())
+        {
+            end = blank + 1;
+        }
 
         let body = lines[start..end].join("\n");
         let body = truncate(&body, MAX_BYTES);
@@ -45,14 +50,7 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
             });
         }
 
-        if end >= lines.len() {
-            break;
-        }
-        start = if end - start > 2 * OVERLAP {
-            end - OVERLAP
-        } else {
-            end
-        };
+        start = end;
     }
     chunks
 }
@@ -73,14 +71,45 @@ pub fn truncate(s: &str, max: usize) -> &str {
 mod tests {
     use super::*;
 
+    fn spans(chunks: &[Chunk]) -> Vec<(u32, u32)> {
+        chunks.iter().map(|c| (c.start_line, c.end_line)).collect()
+    }
+
     #[test]
-    fn splits_long_text_with_overlap() {
-        let text: String = (1..=100).map(|i| format!("line {i}\n")).collect();
-        let chunks = chunk_text(&text);
-        assert_eq!(chunks[0].start_line, 1);
-        assert_eq!(chunks[0].end_line, MAX_LINES as u32);
-        assert_eq!(chunks[1].start_line, (MAX_LINES - OVERLAP) as u32 + 1);
-        assert_eq!(chunks.last().unwrap().end_line, 100);
+    fn splits_at_line_limit() {
+        let text: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(spans(&chunk_text(&text)), [(1, 20), (21, 40), (41, 50)]);
+    }
+
+    #[test]
+    fn ends_chunks_at_blank_lines() {
+        let text: String = (1..=60)
+            .map(|i| {
+                if i % 15 == 0 {
+                    "\n".into()
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect();
+        assert_eq!(
+            spans(&chunk_text(&text)),
+            [(1, 15), (16, 30), (31, 45), (46, 60)]
+        );
+    }
+
+    #[test]
+    fn ignores_blank_lines_early_in_a_chunk() {
+        let text: String = (1..=30)
+            .map(|i| {
+                if i == 5 {
+                    "\n".into()
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect();
+        assert_eq!(spans(&chunk_text(&text)), [(1, 20), (21, 30)]);
     }
 
     #[test]

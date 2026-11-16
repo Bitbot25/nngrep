@@ -4,7 +4,7 @@ use half::f16;
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nngrep::chunk::{chunk_text, truncate};
-use nngrep::embed::{self, Embedder};
+use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, INDEX_DIR, Index};
 use std::collections::HashMap;
 use std::fs;
@@ -43,7 +43,7 @@ struct Args {
     max_file_size: u64,
 
     /// Chunks per embedding request
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 64)]
     batch_size: usize,
 }
 
@@ -59,13 +59,16 @@ fn main() -> Result<()> {
     let start = Instant::now();
     let root = fs::canonicalize(&args.dir)
         .with_context(|| format!("cannot access {}", args.dir.display()))?;
-    let model = embed::model_name();
+    let loading = spinner("Connecting to embedding server");
+    let embedder = Embedder::connect()?;
+    loading.finish_and_clear();
+    let model = embedder.model();
 
     let mut old: HashMap<String, (FileEntry, Vec<f16>)> = HashMap::new();
     let mut dim = 0;
     if !args.force && root.join(INDEX_DIR).exists() {
         match Index::load(&root) {
-            Ok(index) if embed::compatible(&index.model, &model) => {
+            Ok(index) if index.model == model => {
                 dim = index.dim;
                 for (file, vectors) in index.iter_files() {
                     old.insert(file.path.clone(), (file.clone(), vectors.to_vec()));
@@ -79,7 +82,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut index = Index::new(&model, dim);
+    let mut index = Index::new(model, dim);
     let scan = spinner("Scanning files {pos}");
     let (pending, skipped) = scan_files(&root, &args, &mut old, &mut index, &scan);
     scan.finish_and_clear();
@@ -92,16 +95,7 @@ fn main() -> Result<()> {
         pending.len(),
     );
 
-    if total_chunks > 0 {
-        let loading = spinner("Starting embedding server (the first run downloads the model)");
-        let embedder = Embedder::connect()?;
-        loading.finish_and_clear();
-        embed_files(&embedder, &root, pending, &mut index, args.batch_size)?;
-    } else {
-        for p in pending {
-            index.push(p.entry, &[]);
-        }
-    }
+    embed_files(&embedder, &root, pending, &mut index, args.batch_size)?;
     index.save(&root)?;
 
     let chunks: usize = index.files.iter().map(|f| f.chunks.len()).sum();

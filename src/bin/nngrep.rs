@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use half::f16;
 use half::slice::HalfFloatSliceExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use nngrep::embed::{self, Embedder};
+use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, Index};
 use rayon::prelude::*;
 use std::env;
@@ -66,14 +66,6 @@ fn main() -> Result<()> {
     let target = fs::canonicalize(&args.path)
         .with_context(|| format!("cannot access {}", args.path.display()))?;
     let (root, index) = Index::find(&target)?;
-    let model = embed::model_name();
-    if !embed::compatible(&index.model, &model) {
-        eprintln!(
-            "warning: index was built with {}, searching with {model}",
-            index.model
-        );
-    }
-
     let prefix = target
         .strip_prefix(&root)?
         .to_str()
@@ -86,9 +78,16 @@ fn main() -> Result<()> {
 
     let loading = ProgressBar::new_spinner()
         .with_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap())
-        .with_message("Starting embedding server");
+        .with_message("Connecting to embedding server");
     loading.enable_steady_tick(Duration::from_millis(100));
     let embedder = Embedder::connect()?;
+    if embedder.model() != index.model {
+        bail!(
+            "index was built with {} but the embedding server runs {}",
+            index.model,
+            embedder.model()
+        );
+    }
     let query = embedder.embed_query(&args.query)?;
     loading.finish_and_clear();
     drop(embedder);

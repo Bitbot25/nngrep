@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Server used when NNGREP_SERVER is not set, if one is running there
+pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8000";
+
 /// Model loaded by a spawned llama-server unless NNGREP_MODEL is set
 pub const DEFAULT_MODEL: &str = "Qwen/Qwen3-Embedding-4B-GGUF:Q8_0";
 
@@ -20,15 +23,17 @@ const QUERY_TASK: &str =
 /// Lines of server output kept for error reports
 const LOG_LINES: usize = 40;
 
-/// A client for a llama.cpp embedding server.
+/// A client for an OpenAI-compatible embedding server, such as vLLM.
 ///
-/// Connects to the server at NNGREP_SERVER if set. Otherwise it starts a private
+/// Connects to NNGREP_SERVER, or to DEFAULT_SERVER if that is unset. If no
+/// server is set and none is running at DEFAULT_SERVER, it starts a private
 /// llama-server that lives as long as the embedder, loading NNGREP_MODEL (a GGUF
 /// path or a Hugging Face repo, default DEFAULT_MODEL) with extra arguments from
 /// NNGREP_SERVER_ARGS.
 pub struct Embedder {
     agent: ureq::Agent,
     url: String,
+    model: String,
     _server: Option<Server>,
 }
 
@@ -43,6 +48,16 @@ struct EmbeddingData {
     embedding: Vec<f32>,
 }
 
+#[derive(Deserialize)]
+struct ModelList {
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Deserialize)]
+struct ModelInfo {
+    id: String,
+}
+
 impl Embedder {
     /// Connects to or starts an embedding server and waits until it is ready.
     pub fn connect() -> Result<Self> {
@@ -51,23 +66,39 @@ impl Embedder {
             .timeout_read(Duration::from_secs(600))
             .build();
 
-        let model = model_name();
-        let (url, server) = match env::var("NNGREP_SERVER") {
-            Ok(url) => (url.trim_end_matches('/').to_string(), None),
-            Err(_) => {
-                let port = free_port()?;
-                let server = Server::spawn(&model, port)?;
-                (format!("http://127.0.0.1:{port}"), Some(server))
+        let explicit = env::var("NNGREP_SERVER").ok();
+        let url = explicit.as_deref().unwrap_or(DEFAULT_SERVER);
+        let url = url.trim_end_matches('/').to_string();
+        match served_model(&agent, &url) {
+            Ok(model) => {
+                return Ok(Embedder {
+                    agent,
+                    url,
+                    model,
+                    _server: None,
+                });
             }
-        };
+            Err(e) if explicit.is_none() && is_connection_failure(&e) => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("embedding server at {url}"));
+            }
+        }
 
+        let model = env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+        let port = free_port()?;
         let embedder = Embedder {
             agent,
-            url,
-            _server: server,
+            url: format!("http://127.0.0.1:{port}"),
+            model: canonical_model_name(&model),
+            _server: Some(Server::spawn(&model, port)?),
         };
         embedder.wait_ready()?;
         Ok(embedder)
+    }
+
+    /// Name of the embedding model, independent of quantization and file format
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     fn wait_ready(&self) -> Result<()> {
@@ -79,9 +110,7 @@ impl Embedder {
             match self.agent.get(&health).call() {
                 Ok(_) => return Ok(()),
                 // 503 while loading, connection refused before listening
-                Err(ureq::Error::Status(503, _)) | Err(ureq::Error::Transport(_))
-                    if self._server.is_some() =>
-                {
+                Err(ureq::Error::Status(503, _)) | Err(ureq::Error::Transport(_)) => {
                     thread::sleep(Duration::from_millis(200))
                 }
                 Err(e) => {
@@ -121,19 +150,37 @@ impl Embedder {
     }
 }
 
-/// Name of the model the embedder uses, as recorded in the index.
-/// "external" when connecting to a server given by NNGREP_SERVER.
-pub fn model_name() -> String {
-    if env::var_os("NNGREP_SERVER").is_some() {
-        return "external".into();
-    }
-    env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into())
+/// Returns the canonical name of the first model served at url.
+fn served_model(agent: &ureq::Agent, url: &str) -> Result<String> {
+    let list: ModelList = agent.get(&format!("{url}/v1/models")).call()?.into_json()?;
+    let id = list.data.first().map_or("unknown", |m| m.id.as_str());
+    Ok(canonical_model_name(id))
 }
 
-/// Could indexes built with these models be used together?
-/// The model behind an external server is unknown, so it matches any model.
-pub fn compatible(a: &str, b: &str) -> bool {
-    a == b || a == "external" || b == "external"
+fn is_connection_failure(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<ureq::Error>(),
+        Some(ureq::Error::Transport(t)) if t.kind() == ureq::ErrorKind::ConnectionFailed)
+}
+
+/// Strips the organization, file extension, quantization and format from a
+/// model name, so that e.g. "Qwen/Qwen3-Embedding-4B-GGUF:Q8_0",
+/// "/models/Qwen3-Embedding-4B-Q8_0.gguf" and "Qwen/Qwen3-Embedding-4B" are all
+/// "Qwen3-Embedding-4B".
+pub fn canonical_model_name(name: &str) -> String {
+    let mut name = name.rsplit('/').next().unwrap_or(name);
+    name = name.split(':').next().unwrap_or(name);
+    name = name.strip_suffix(".gguf").unwrap_or(name);
+    name = name.strip_suffix("-GGUF").unwrap_or(name);
+    if let Some((base, suffix)) = name.rsplit_once('-') {
+        let s = suffix.to_ascii_lowercase();
+        let quant = s.starts_with('q') && s[1..].starts_with(|c: char| c.is_ascii_digit())
+            || s.starts_with("iq")
+            || ["f16", "bf16", "f32"].contains(&s.as_str());
+        if quant {
+            name = base;
+        }
+    }
+    name.to_string()
 }
 
 fn normalized(mut v: Vec<f32>) -> Vec<f32> {
@@ -225,4 +272,21 @@ fn collect_lines(stream: impl Read + Send + 'static, log: Arc<Mutex<VecDeque<Str
             log.push_back(line);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_model_name;
+
+    #[test]
+    fn canonicalizes_model_names() {
+        for name in [
+            "Qwen/Qwen3-Embedding-4B-GGUF:Q8_0",
+            "/models/Qwen3-Embedding-4B-Q8_0.gguf",
+            "Qwen3-Embedding-4B-f16.gguf",
+            "Qwen/Qwen3-Embedding-4B",
+        ] {
+            assert_eq!(canonical_model_name(name), "Qwen3-Embedding-4B", "{name}");
+        }
+    }
 }
