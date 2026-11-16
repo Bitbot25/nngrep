@@ -9,7 +9,7 @@ pub const INDEX_DIR: &str = ".nngrep";
 
 const META_FILE: &str = "index.json";
 const VECTORS_FILE: &str = "vectors.f16";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Embeddings of the text files in a directory tree.
 #[derive(Serialize, Deserialize)]

@@ -6,7 +6,7 @@ use ignore::Match;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::{Types, TypesBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
-use nngrep::embed::{self, Embedder};
+use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, Index};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -249,9 +249,10 @@ fn run(args: Args) -> Result<Outcome> {
 
     let loading = ProgressBar::new_spinner()
         .with_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap())
-        .with_message("Starting embedding server");
+        .with_message("Connecting to embedding server");
     loading.enable_steady_tick(Duration::from_millis(100));
     let embedder = Embedder::connect()?;
+    let model = embedder.model().to_string();
     let queries: Vec<Vec<f32>> = queries
         .iter()
         .map(|q| embedder.embed_query(q))
@@ -259,18 +260,17 @@ fn run(args: Args) -> Result<Outcome> {
     loading.finish_and_clear();
     drop(embedder);
 
-    let dim = queries[0].len();
     for source in &sources {
-        if source.index.dim != dim {
+        if source.index.model != model {
             eprintln!(
-                "nngrep: index in {} has dimension {}, the embedding server returns {dim}",
+                "nngrep: index in {} was built with {} but the embedding server runs {model}",
                 source.root.display(),
-                source.index.dim
+                source.index.model
             );
             errors = true;
         }
     }
-    candidates.retain(|c| sources[c.source].index.dim == dim);
+    candidates.retain(|c| sources[c.source].index.model == model);
 
     let mut hits = score(&candidates, &queries);
     hits.retain(|h| h.score >= args.min_score);
@@ -319,14 +319,6 @@ fn add_target(sources: &mut Vec<Source>, given: Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
     let index = Index::load(&root)?;
-    let model = embed::model_name();
-    if !embed::compatible(&index.model, &model) {
-        eprintln!(
-            "nngrep: warning: index in {} was built with {}, searching with {model}",
-            root.display(),
-            index.model
-        );
-    }
     sources.push(Source {
         root,
         index,
