@@ -80,15 +80,13 @@ impl Index {
         Ok(index)
     }
 
-    /// Finds the index covering path by searching it and its ancestors.
-    /// Returns the index root and the index.
-    pub fn find(path: &Path) -> Result<(PathBuf, Self)> {
-        for dir in path.ancestors() {
-            if dir.join(INDEX_DIR).join(META_FILE).is_file() {
-                return Ok((dir.to_path_buf(), Index::load(dir)?));
-            }
-        }
-        bail!("no index found for {}; run nnindex first", path.display())
+    /// Returns the root of the index covering path, the closest of path and
+    /// its ancestors that holds an index.
+    pub fn find_root(path: &Path) -> Result<PathBuf> {
+        path.ancestors()
+            .find(|dir| dir.join(INDEX_DIR).join(META_FILE).is_file())
+            .map(Path::to_path_buf)
+            .with_context(|| format!("no index found for {}; run nnindex first", path.display()))
     }
 
     /// Writes the index under root, replacing any existing one.

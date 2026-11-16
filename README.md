@@ -33,12 +33,34 @@ Progress is saved every 30 seconds, so an interrupted run resumes where it stopp
 ## nngrep
 
 ```
-nngrep QUERY [PATH] [-k N] [-l] [-L LINES | --full] [-s MIN_SCORE] [--color WHEN]
+nngrep [OPTIONS] QUERY [PATH ...]
+nngrep [OPTIONS] -e QUERY ... [PATH ...]
 ```
 
-Searches the index covering `PATH` (found by looking in `PATH` and its parents),
-restricted to files under `PATH`. Prints the `-k` best chunks with their cosine
-similarity, or with `-l` only the best matching files.
+Searches the files under each `PATH` (default: the current directory), using the
+index covering it (found by looking in `PATH` and its parents). Paths may belong
+to different indexes. Prints the `-k` best chunks, ranked by cosine similarity.
+
+The options follow ripgrep where they apply:
+
+| Option                     | Meaning                                                          |
+| -------------------------- | ---------------------------------------------------------------- |
+| `-e QUERY`                 | Search for several queries; a chunk scores its best match        |
+| `-k NUM`                   | Number of results (default 10)                                   |
+| `-m NUM`                   | At most `NUM` chunks per file                                    |
+| `--min-score SCORE`        | Only show chunks with at least this similarity                   |
+| `-l`, `-0`                 | Only print the paths of the best matching files (NUL-separated)  |
+| `-q`                       | Print nothing; only set the exit status                          |
+| `-g GLOB`                  | Include or exclude (`!GLOB`) files, like ripgrep                 |
+| `-t TYPE`, `-T TYPE`       | Only search, or skip, files of a type (see `--type-list`)        |
+| `-n`, `-N`                 | Show or hide line numbers                                        |
+| `--heading`, `--no-heading`| Summary line above each chunk, or the path on every line         |
+| `--lines NUM`, `--full`    | Lines of each chunk to print (default 5), or all of them         |
+| `--color WHEN`             | `auto`, `always` or `never`                                      |
+
+As in ripgrep, output to a terminal has headings and line numbers, while piped
+output prints `PATH:TEXT` lines with `--` between chunks. The exit status is 0 if
+anything was found, 1 if nothing was and 2 if an error occurred.
 
 ## Configuration
 
