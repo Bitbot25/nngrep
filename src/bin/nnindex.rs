@@ -45,6 +45,11 @@ struct Args {
     /// Chunks per embedding request
     #[arg(long, default_value_t = 64)]
     batch_size: usize,
+
+    /// Run the embedding model on the CPU in a private llama-server, even if
+    /// an embedding server is running
+    #[arg(long)]
+    cpu: bool,
 }
 
 /// A file whose chunks still need embedding.
@@ -60,7 +65,11 @@ fn main() -> Result<()> {
     let root = fs::canonicalize(&args.dir)
         .with_context(|| format!("cannot access {}", args.dir.display()))?;
     let loading = spinner("Connecting to embedding server");
-    let embedder = Embedder::connect()?;
+    let embedder = if args.cpu {
+        Embedder::start_on_cpu()?
+    } else {
+        Embedder::connect()?
+    };
     loading.finish_and_clear();
     let model = embedder.model();
 

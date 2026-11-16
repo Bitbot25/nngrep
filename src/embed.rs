@@ -25,11 +25,9 @@ const LOG_LINES: usize = 40;
 
 /// A client for an OpenAI-compatible embedding server, such as vLLM.
 ///
-/// Connects to NNGREP_SERVER, or to DEFAULT_SERVER if that is unset. If no
-/// server is set and none is running at DEFAULT_SERVER, it starts a private
-/// llama-server that lives as long as the embedder, loading NNGREP_MODEL (a GGUF
-/// path or a Hugging Face repo, default DEFAULT_MODEL) with extra arguments from
-/// NNGREP_SERVER_ARGS.
+/// A private server is a llama-server that lives as long as the embedder,
+/// loading NNGREP_MODEL (a GGUF path or a Hugging Face repo, default
+/// DEFAULT_MODEL) with extra arguments from NNGREP_SERVER_ARGS.
 pub struct Embedder {
     agent: ureq::Agent,
     url: String,
@@ -59,13 +57,11 @@ struct ModelInfo {
 }
 
 impl Embedder {
-    /// Connects to or starts an embedding server and waits until it is ready.
+    /// Connects to NNGREP_SERVER, or to DEFAULT_SERVER if that is unset. If no
+    /// server is set and none is running at DEFAULT_SERVER, starts a private
+    /// server on the GPU and waits until it is ready.
     pub fn connect() -> Result<Self> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_secs(600))
-            .build();
-
+        let agent = new_agent();
         let explicit = env::var("NNGREP_SERVER").ok();
         let url = explicit.as_deref().unwrap_or(DEFAULT_SERVER);
         let url = url.trim_end_matches('/').to_string();
@@ -84,13 +80,26 @@ impl Embedder {
             }
         }
 
+        Self::spawn(agent, Device::Gpu)
+    }
+
+    /// Starts a private server on the CPU and waits until it is ready.
+    /// NNGREP_SERVER must not be set.
+    pub fn start_on_cpu() -> Result<Self> {
+        if env::var_os("NNGREP_SERVER").is_some() {
+            bail!("NNGREP_SERVER is set; unset it to run the model on the CPU");
+        }
+        Self::spawn(new_agent(), Device::Cpu)
+    }
+
+    fn spawn(agent: ureq::Agent, device: Device) -> Result<Self> {
         let model = env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
         let port = free_port()?;
         let embedder = Embedder {
             agent,
             url: format!("http://127.0.0.1:{port}"),
             model: canonical_model_name(&model),
-            _server: Some(Server::spawn(&model, port)?),
+            _server: Some(Server::spawn(&model, port, device)?),
         };
         embedder.wait_ready()?;
         Ok(embedder)
@@ -150,6 +159,13 @@ impl Embedder {
     }
 }
 
+fn new_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(600))
+        .build()
+}
+
 /// Returns the canonical name of the first model served at url.
 fn served_model(agent: &ureq::Agent, url: &str) -> Result<String> {
     let list: ModelList = agent.get(&format!("{url}/v1/models")).call()?.into_json()?;
@@ -195,6 +211,13 @@ fn free_port() -> Result<u16> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
+/// Where a private server runs the model
+#[derive(Clone, Copy)]
+enum Device {
+    Gpu,
+    Cpu,
+}
+
 /// A llama-server child process, killed on drop.
 struct Server {
     child: Mutex<Child>,
@@ -203,7 +226,7 @@ struct Server {
 }
 
 impl Server {
-    fn spawn(model: &str, port: u16) -> Result<Self> {
+    fn spawn(model: &str, port: u16, device: Device) -> Result<Self> {
         let bin = env::var("NNGREP_LLAMA_SERVER").unwrap_or_else(|_| "llama-server".into());
         let mut cmd = Command::new(&bin);
         if Path::new(model).is_file() {
@@ -212,9 +235,14 @@ impl Server {
             cmd.arg("-hf").arg(model);
         }
         // A single slot is faster than batching sequences across slots
-        cmd.args(["--embedding", "--pooling", "last", "-ngl", "999"])
+        cmd.args(["--embedding", "--pooling", "last"])
             .args(["-c", "2048", "-np", "1", "-b", "2048", "-ub", "2048"])
             .args(["--host", "127.0.0.1", "--port", &port.to_string()]);
+        match device {
+            Device::Gpu => cmd.args(["-ngl", "999"]),
+            // Warming up costs more than it saves on a single query
+            Device::Cpu => cmd.args(["-dev", "none", "--no-warmup"]),
+        };
         if let Ok(extra) = env::var("NNGREP_SERVER_ARGS") {
             cmd.args(extra.split_whitespace());
         }

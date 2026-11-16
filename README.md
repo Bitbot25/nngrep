@@ -21,6 +21,11 @@ nngrep needs an embedding server. It uses one of these:
    started for the duration of the command. `llama-server` must be on `PATH`.
    On first use it downloads `Qwen/Qwen3-Embedding-4B-GGUF:Q8_0` (about 4 GB).
 
+With `--cpu`, `nnindex` and `nngrep` always start their own `llama-server` and
+run the model on the CPU, leaving the GPU alone. A query then takes about as
+long as on the GPU, since most of the time goes to starting `llama-server`, but
+indexing is much slower. `--cpu` cannot be combined with `NNGREP_SERVER`.
+
 ### vLLM (recommended)
 
 vLLM indexes about 2.5 times faster than llama.cpp, but takes minutes to start,
@@ -45,7 +50,7 @@ vLLM reserves 90% of GPU memory by default; lower it with `--gpu-memory-utilizat
 ## nnindex
 
 ```
-nnindex [DIR] [--force] [--max-file-size BYTES] [--batch-size N]
+nnindex [DIR] [--force] [--max-file-size BYTES] [--batch-size N] [--cpu]
 ```
 
 Splits every text file in `DIR` into chunks of up to 20 lines, ending at blank
@@ -82,6 +87,7 @@ The options follow ripgrep where they apply:
 | `--heading`, `--no-heading`| Summary line above each chunk, or the path on every line         |
 | `--lines NUM`, `--full`    | Lines of each chunk to print (default 5), or all of them         |
 | `--color WHEN`             | `auto`, `always` or `never`                                      |
+| `--cpu`                    | Run the model on the CPU (see [Installation](#installation))     |
 
 As in ripgrep, output to a terminal has headings and line numbers, while piped
 output prints `PATH:TEXT` lines with `--` between chunks. The exit status is 0 if
@@ -93,7 +99,7 @@ anything was found, 1 if nothing was and 2 if an error occurred.
 | --------------------- | ------------------------------------------------------------------ |
 | `NNGREP_SERVER`       | URL of the embedding server (default `http://127.0.0.1:8000`)      |
 | `NNGREP_MODEL`        | GGUF path or Hugging Face repo for a spawned `llama-server`        |
-| `NNGREP_SERVER_ARGS`  | Extra arguments for a spawned `llama-server`, e.g. `-ngl 0` for CPU |
+| `NNGREP_SERVER_ARGS`  | Extra arguments for a spawned `llama-server`                       |
 | `NNGREP_LLAMA_SERVER` | Path to the `llama-server` binary                                  |
 
 The index records the model it was built with, ignoring quantization and file

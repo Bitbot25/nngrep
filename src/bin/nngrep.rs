@@ -112,6 +112,11 @@ struct Args {
 
     #[arg(long, value_name = "WHEN", value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
+
+    /// Run the embedding model on the CPU in a private llama-server, even if
+    /// an embedding server is running
+    #[arg(long)]
+    cpu: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -251,7 +256,11 @@ fn run(args: Args) -> Result<Outcome> {
         .with_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap())
         .with_message("Connecting to embedding server");
     loading.enable_steady_tick(Duration::from_millis(100));
-    let embedder = Embedder::connect()?;
+    let embedder = if args.cpu {
+        Embedder::start_on_cpu()?
+    } else {
+        Embedder::connect()?
+    };
     let model = embedder.model().to_string();
     let queries: Vec<Vec<f32>> = queries
         .iter()
