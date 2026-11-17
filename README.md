@@ -81,7 +81,9 @@ The options follow ripgrep where they apply:
 | `-e QUERY`                 | Search for several queries; a chunk scores its best match        |
 | `-k NUM`                   | Number of results (default 10)                                   |
 | `-m NUM`                   | At most `NUM` chunks per file                                    |
-| `--min-score SCORE`        | Only show chunks with at least this similarity                   |
+| `--min-score SCORE`        | Only show chunks with at least this score                        |
+| `--rerank`                 | Rank the best chunks again with a reranker (see below)           |
+| `--rerank-depth NUM`       | Number of chunks to rerank, at least `-k` (default 30)           |
 | `-l`, `-0`                 | Only print the paths of the best matching files (NUL-separated)  |
 | `-q`                       | Print nothing; only set the exit status                          |
 | `-g GLOB`                  | Include or exclude (`!GLOB`) files, like ripgrep                 |
@@ -90,11 +92,26 @@ The options follow ripgrep where they apply:
 | `--heading`, `--no-heading`| Summary line above each chunk, or the path on every line         |
 | `--lines NUM`, `--full`    | Lines of each chunk to print (default 5), or all of them         |
 | `--color WHEN`             | `auto`, `always` or `never`                                      |
-| `--cpu`                    | Run the model on the CPU (see [Installation](#installation))     |
+| `--cpu`                    | Run the models on the CPU (see [Installation](#installation))    |
 
 As in ripgrep, output to a terminal has headings and line numbers, while piped
 output prints `PATH:TEXT` lines with `--` between chunks. The exit status is 0 if
 anything was found, 1 if nothing was and 2 if an error occurred.
+
+### Reranking
+
+With `--rerank`, nngrep takes the best chunks by cosine similarity and ranks
+them again with [Qwen3-Reranker-4B](https://huggingface.co/Qwen/Qwen3-Reranker-4B),
+which reads each chunk together with the query. Scores are then the reranker's
+estimate that a chunk is what the query asks for, from 0 to 1.
+
+The reranker runs in process, after the embedding model has been unloaded. On
+first use it downloads `Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q8_0` (about
+4 GB), a llama.cpp conversion of Qwen's model, since Qwen publishes none. It
+uses about 6.5 GB of GPU memory and takes about 2 seconds for 30 chunks on an
+RX 7900 XT, plus the time to load it. On smaller machines,
+`NNGREP_RERANK_MODEL=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` is about 5 times
+faster but ranks less well.
 
 ## Configuration
 
@@ -102,6 +119,7 @@ anything was found, 1 if nothing was and 2 if an error occurred.
 | --------------------- | ------------------------------------------------------------------ |
 | `NNGREP_SERVER`       | URL of the embedding server (default `http://127.0.0.1:8000`)      |
 | `NNGREP_MODEL`        | GGUF path or Hugging Face `REPO[:QUANT]` for the in-process model  |
+| `NNGREP_RERANK_MODEL` | Same, for the Qwen3 reranker                                       |
 | `HF_HOME`, `HF_TOKEN` | Hugging Face cache directory (default `~/.cache/huggingface`) and access token |
 
 The index records the model it was built with, ignoring quantization and file

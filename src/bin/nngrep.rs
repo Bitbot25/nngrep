@@ -5,9 +5,12 @@ use half::slice::HalfFloatSliceExt;
 use ignore::Match;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::{Types, TypesBuilder};
+use nngrep::chunk::{MAX_BYTES, truncate};
 use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, Index};
+use nngrep::llama::Device;
 use nngrep::progress::spinner;
+use nngrep::rerank::Reranker;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -52,9 +55,18 @@ struct Args {
     #[arg(short = 'm', long, value_name = "NUM")]
     max_count: Option<usize>,
 
-    /// Only show chunks with at least this similarity (0 to 1)
+    /// Only show chunks with at least this score (0 to 1)
     #[arg(long, value_name = "SCORE", default_value_t = 0.0)]
     min_score: f32,
+
+    /// Rank the best chunks again with a reranker model, which reads each
+    /// chunk together with the query. Scores are then the reranker's.
+    #[arg(long)]
+    rerank: bool,
+
+    /// Number of chunks to rerank, if more than the number of results
+    #[arg(long, value_name = "NUM", default_value_t = 30, requires = "rerank")]
+    rerank_depth: usize,
 
     /// Only print the paths of the best matching files
     #[arg(short = 'l', long)]
@@ -113,8 +125,8 @@ struct Args {
     #[arg(long, value_name = "WHEN", value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
 
-    /// Run the embedding model in process on the CPU, even if an embedding
-    /// server is running
+    /// Run the models in process on the CPU, even if an embedding server is
+    /// running
     #[arg(long)]
     cpu: bool,
 }
@@ -259,7 +271,7 @@ fn run(args: Args) -> Result<Outcome> {
         Embedder::connect()?
     };
     let model = embedder.model().to_string();
-    let queries: Vec<Vec<f32>> = queries
+    let query_vectors: Vec<Vec<f32>> = queries
         .iter()
         .map(|q| embedder.embed_query(q))
         .collect::<Result<_>>()?;
@@ -278,9 +290,14 @@ fn run(args: Args) -> Result<Outcome> {
     }
     candidates.retain(|c| sources[c.source].index.model == model);
 
-    let mut hits = score(&candidates, &queries);
-    hits.retain(|h| h.score >= args.min_score);
+    let mut hits = score(&candidates, &query_vectors);
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    if args.rerank {
+        hits.truncate(args.rerank_depth.max(args.top));
+        let device = if args.cpu { Device::Cpu } else { Device::Gpu };
+        hits = rerank(hits, &queries, &candidates, &sources, device)?;
+    }
+    hits.retain(|h| h.score >= args.min_score);
 
     let selected: Vec<Hit> = if args.files_with_matches {
         let mut seen = HashSet::new();
@@ -431,6 +448,60 @@ fn score(candidates: &[Candidate], queries: &[Vec<f32>]) -> Vec<Hit> {
                 })
         })
         .collect()
+}
+
+/// Returns the hits scored by their best relevance to the queries according to
+/// the reranker, best first. Hits in files changed since indexing are dropped.
+fn rerank(
+    hits: Vec<Hit>,
+    queries: &[String],
+    candidates: &[Candidate],
+    sources: &[Source],
+    device: Device,
+) -> Result<Vec<Hit>> {
+    let mut texts: HashMap<usize, Option<String>> = HashMap::new();
+    let mut kept = Vec::new();
+    let mut documents = Vec::new();
+    for hit in hits {
+        let c = &candidates[hit.candidate];
+        let text = texts.entry(hit.candidate).or_insert_with(|| {
+            let text = read_if_current(&sources[c.source].root.join(&c.file.path), c.file);
+            if text.is_none() {
+                let path = c.target.display(&c.file.path);
+                eprintln!("nngrep: {}: changed since indexing", path.display());
+            }
+            text
+        });
+        let Some(text) = text else { continue };
+        let lines: Vec<&str> = text
+            .lines()
+            .skip(hit.span.start as usize - 1)
+            .take((hit.span.end - hit.span.start + 1) as usize)
+            .collect();
+        documents.push(truncate(&lines.join("\n"), MAX_BYTES).to_string());
+        kept.push(hit);
+    }
+
+    let loading = spinner("Reranking");
+    let mut reranker = Reranker::load(device)?;
+    let documents: Vec<&str> = documents.iter().map(String::as_str).collect();
+    let mut relevance = vec![f32::NEG_INFINITY; kept.len()];
+    for query in queries {
+        for (best, r) in relevance.iter_mut().zip(reranker.score(query, &documents)?) {
+            *best = best.max(r);
+        }
+    }
+    loading.finish_and_clear();
+
+    let mut order: Vec<usize> = (0..kept.len()).collect();
+    order.sort_by(|&a, &b| relevance[b].total_cmp(&relevance[a]));
+    Ok(order
+        .into_iter()
+        .map(|i| Hit {
+            score: relevance[i],
+            ..kept[i]
+        })
+        .collect())
 }
 
 /// Output settings

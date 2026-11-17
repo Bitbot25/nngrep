@@ -4,3 +4,4 @@ pub mod hub;
 pub mod index;
 pub mod llama;
 pub mod progress;
+pub mod rerank;
