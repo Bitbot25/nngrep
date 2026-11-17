@@ -6,6 +6,7 @@ use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nngrep::chunk::{chunk_text, truncate};
 use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, INDEX_DIR, Index};
+use nngrep::progress::spinner;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// Concurrent embedding requests, so the server always has work queued
+/// Concurrent embedding requests, so the model always has work queued
 const WORKERS: usize = 2;
 
 /// Maximum length of the file path prepended to each chunk
@@ -46,8 +47,8 @@ struct Args {
     #[arg(long, default_value_t = 64)]
     batch_size: usize,
 
-    /// Run the embedding model on the CPU in a private llama-server, even if
-    /// an embedding server is running
+    /// Run the embedding model in process on the CPU, even if an embedding
+    /// server is running
     #[arg(long)]
     cpu: bool,
 }
@@ -64,9 +65,9 @@ fn main() -> Result<()> {
     let start = Instant::now();
     let root = fs::canonicalize(&args.dir)
         .with_context(|| format!("cannot access {}", args.dir.display()))?;
-    let loading = spinner("Connecting to embedding server");
+    let loading = spinner("Loading embedding model");
     let embedder = if args.cpu {
-        Embedder::start_on_cpu()?
+        Embedder::load_on_cpu()?
     } else {
         Embedder::connect()?
     };
@@ -313,12 +314,4 @@ fn embed_files(
 
     progress.finish_and_clear();
     Ok(())
-}
-
-fn spinner(template: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner().with_style(
-        ProgressStyle::with_template(&format!("{{spinner:.green}} {template}")).unwrap(),
-    );
-    pb.enable_steady_tick(Duration::from_millis(100));
-    pb
 }

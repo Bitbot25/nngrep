@@ -5,9 +5,9 @@ use half::slice::HalfFloatSliceExt;
 use ignore::Match;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::{Types, TypesBuilder};
-use indicatif::{ProgressBar, ProgressStyle};
 use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, Index};
+use nngrep::progress::spinner;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -16,7 +16,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 /// Search files semantically, using indexes built by nnindex.
 ///
@@ -113,8 +113,8 @@ struct Args {
     #[arg(long, value_name = "WHEN", value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
 
-    /// Run the embedding model on the CPU in a private llama-server, even if
-    /// an embedding server is running
+    /// Run the embedding model in process on the CPU, even if an embedding
+    /// server is running
     #[arg(long)]
     cpu: bool,
 }
@@ -252,12 +252,9 @@ fn run(args: Args) -> Result<Outcome> {
         });
     }
 
-    let loading = ProgressBar::new_spinner()
-        .with_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap())
-        .with_message("Connecting to embedding server");
-    loading.enable_steady_tick(Duration::from_millis(100));
+    let loading = spinner("Loading embedding model");
     let embedder = if args.cpu {
-        Embedder::start_on_cpu()?
+        Embedder::load_on_cpu()?
     } else {
         Embedder::connect()?
     };
@@ -272,7 +269,7 @@ fn run(args: Args) -> Result<Outcome> {
     for source in &sources {
         if source.index.model != model {
             eprintln!(
-                "nngrep: index in {} was built with {} but the embedding server runs {model}",
+                "nngrep: index in {} was built with {} but the embedding model is {model}",
                 source.root.display(),
                 source.index.model
             );

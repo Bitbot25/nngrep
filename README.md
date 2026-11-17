@@ -13,22 +13,25 @@ nngrep "where do we retry failed uploads" ~/src/project
 cargo install --path .
 ```
 
-nngrep needs an embedding server. It uses one of these:
+Building compiles [llama.cpp](https://github.com/ggml-org/llama.cpp), which needs
+CMake and a C++ compiler. On macOS it uses Metal; elsewhere it uses Vulkan, which
+also needs the Vulkan headers and `glslc`.
 
-1. The server at `NNGREP_SERVER`, if set.
-2. A server running at `http://127.0.0.1:8000`, vLLM's default address.
-3. Otherwise, its own [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`,
-   started for the duration of the command. `llama-server` must be on `PATH`.
-   On first use it downloads `Qwen/Qwen3-Embedding-4B-GGUF:Q8_0` (about 4 GB).
+nngrep runs its embedding model in one of these ways:
 
-With `--cpu`, `nnindex` and `nngrep` always start their own `llama-server` and
-run the model on the CPU, leaving the GPU alone. A query then takes about as
-long as on the GPU, since most of the time goes to starting `llama-server`, but
-indexing is much slower. `--cpu` cannot be combined with `NNGREP_SERVER`.
+1. On the server at `NNGREP_SERVER`, if set.
+2. On a server running at `http://127.0.0.1:8000`, vLLM's default address.
+3. Otherwise, in process with llama.cpp on the GPU. On first use it downloads
+   `Qwen/Qwen3-Embedding-4B-GGUF:Q8_0` (about 4 GB) into the Hugging Face cache.
+
+With `--cpu`, `nnindex` and `nngrep` always load the model in process and run it
+on the CPU, leaving the GPU alone. A query then takes about as long as on the
+GPU, since most of the time goes to loading the model, but indexing is much
+slower. `--cpu` cannot be combined with `NNGREP_SERVER`.
 
 ### vLLM (recommended)
 
-vLLM indexes about 2.5 times faster than llama.cpp, but takes minutes to start,
+vLLM indexes about 1.5 times faster than llama.cpp, but takes minutes to start,
 so keep it running:
 
 ```sh
@@ -98,9 +101,8 @@ anything was found, 1 if nothing was and 2 if an error occurred.
 | Variable              | Meaning                                                            |
 | --------------------- | ------------------------------------------------------------------ |
 | `NNGREP_SERVER`       | URL of the embedding server (default `http://127.0.0.1:8000`)      |
-| `NNGREP_MODEL`        | GGUF path or Hugging Face repo for a spawned `llama-server`        |
-| `NNGREP_SERVER_ARGS`  | Extra arguments for a spawned `llama-server`                       |
-| `NNGREP_LLAMA_SERVER` | Path to the `llama-server` binary                                  |
+| `NNGREP_MODEL`        | GGUF path or Hugging Face `REPO[:QUANT]` for the in-process model  |
+| `HF_HOME`, `HF_TOKEN` | Hugging Face cache directory (default `~/.cache/huggingface`) and access token |
 
 The index records the model it was built with, ignoring quantization and file
 format, so an index built through llama.cpp can be searched through vLLM.

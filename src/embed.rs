@@ -1,38 +1,43 @@
-use anyhow::{Context, Result, bail};
+use crate::hub;
+use crate::llama::{Device, Session};
+use anyhow::{Context, Result, anyhow, bail};
+use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::token::LlamaToken;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::VecDeque;
 use std::env;
-use std::io::{BufRead, BufReader, Read};
-use std::net::TcpListener;
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::num::NonZeroU32;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Server used when NNGREP_SERVER is not set, if one is running there
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8000";
 
-/// Model loaded by a spawned llama-server unless NNGREP_MODEL is set
+/// Model loaded in process unless NNGREP_MODEL is set
 pub const DEFAULT_MODEL: &str = "Qwen/Qwen3-Embedding-4B-GGUF:Q8_0";
 
 const QUERY_TASK: &str =
     "Given a search query, retrieve relevant code or text passages that match the query";
 
-/// Lines of server output kept for error reports
-const LOG_LINES: usize = 40;
+/// Maximum number of tokens decoded at once by an in-process model. Longer
+/// texts are truncated.
+const BATCH_TOKENS: usize = 2048;
 
-/// A client for an OpenAI-compatible embedding server, such as vLLM.
-///
-/// A private server is a llama-server that lives as long as the embedder,
-/// loading NNGREP_MODEL (a GGUF path or a Hugging Face repo, default
-/// DEFAULT_MODEL) with extra arguments from NNGREP_SERVER_ARGS.
+/// Maximum number of texts decoded at once by an in-process model
+const BATCH_SEQS: usize = 64;
+
+/// An embedding model, either served by an OpenAI-compatible server such as
+/// vLLM, or loaded in process from NNGREP_MODEL (a GGUF path or a Hugging Face
+/// repository, default DEFAULT_MODEL).
 pub struct Embedder {
-    agent: ureq::Agent,
-    url: String,
+    runner: Runner,
     model: String,
-    _server: Option<Server>,
+}
+
+enum Runner {
+    Server { agent: ureq::Agent, url: String },
+    Local(Mutex<Session>),
 }
 
 #[derive(Deserialize)]
@@ -58,51 +63,49 @@ struct ModelInfo {
 
 impl Embedder {
     /// Connects to NNGREP_SERVER, or to DEFAULT_SERVER if that is unset. If no
-    /// server is set and none is running at DEFAULT_SERVER, starts a private
-    /// server on the GPU and waits until it is ready.
+    /// server is set and none is running at DEFAULT_SERVER, loads the model in
+    /// process on the GPU.
     pub fn connect() -> Result<Self> {
-        let agent = new_agent();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(600))
+            .build();
         let explicit = env::var("NNGREP_SERVER").ok();
         let url = explicit.as_deref().unwrap_or(DEFAULT_SERVER);
         let url = url.trim_end_matches('/').to_string();
         match served_model(&agent, &url) {
-            Ok(model) => {
-                return Ok(Embedder {
-                    agent,
-                    url,
-                    model,
-                    _server: None,
-                });
-            }
-            Err(e) if explicit.is_none() && is_connection_failure(&e) => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("embedding server at {url}"));
-            }
+            Ok(model) => Ok(Embedder {
+                runner: Runner::Server { agent, url },
+                model,
+            }),
+            Err(e) if explicit.is_none() && is_connection_failure(&e) => Self::load(Device::Gpu),
+            Err(e) => Err(e).with_context(|| format!("embedding server at {url}")),
         }
-
-        Self::spawn(agent, Device::Gpu)
     }
 
-    /// Starts a private server on the CPU and waits until it is ready.
-    /// NNGREP_SERVER must not be set.
-    pub fn start_on_cpu() -> Result<Self> {
+    /// Loads the model in process on the CPU. NNGREP_SERVER must not be set.
+    pub fn load_on_cpu() -> Result<Self> {
         if env::var_os("NNGREP_SERVER").is_some() {
             bail!("NNGREP_SERVER is set; unset it to run the model on the CPU");
         }
-        Self::spawn(new_agent(), Device::Cpu)
+        Self::load(Device::Cpu)
     }
 
-    fn spawn(agent: ureq::Agent, device: Device) -> Result<Self> {
-        let model = env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        let port = free_port()?;
-        let embedder = Embedder {
-            agent,
-            url: format!("http://127.0.0.1:{port}"),
-            model: canonical_model_name(&model),
-            _server: Some(Server::spawn(&model, port, device)?),
-        };
-        embedder.wait_ready()?;
-        Ok(embedder)
+    fn load(device: Device) -> Result<Self> {
+        let spec = env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+        let params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(BATCH_TOKENS as u32))
+            .with_n_batch(BATCH_TOKENS as u32)
+            .with_n_ubatch(BATCH_TOKENS as u32)
+            .with_n_seq_max(BATCH_SEQS as u32)
+            .with_kv_unified(true)
+            .with_embeddings(true)
+            .with_pooling_type(LlamaPoolingType::Last);
+        let session = Session::load(&hub::model_path(&spec)?, device, params)?;
+        Ok(Embedder {
+            runner: Runner::Local(Mutex::new(session)),
+            model: canonical_model_name(&spec),
+        })
     }
 
     /// Name of the embedding model, independent of quantization and file format
@@ -110,46 +113,13 @@ impl Embedder {
         &self.model
     }
 
-    fn wait_ready(&self) -> Result<()> {
-        let health = format!("{}/health", self.url);
-        loop {
-            if let Some(server) = &self._server {
-                server.check_alive()?;
-            }
-            match self.agent.get(&health).call() {
-                Ok(_) => return Ok(()),
-                // 503 while loading, connection refused before listening
-                Err(ureq::Error::Status(503, _)) | Err(ureq::Error::Transport(_)) => {
-                    thread::sleep(Duration::from_millis(200))
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("embedding server at {}", self.url));
-                }
-            }
-        }
-    }
-
     /// Returns L2-normalized embeddings of documents, in order.
     pub fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let response = self
-            .agent
-            .post(&format!("{}/v1/embeddings", self.url))
-            .send_json(json!({ "input": texts }));
-        let response: EmbeddingResponse = match response {
-            Ok(r) => r.into_json()?,
-            Err(ureq::Error::Status(code, r)) => {
-                let body = r.into_string().unwrap_or_default();
-                bail!("embedding server returned {code}: {body}");
-            }
-            Err(e) => return Err(e.into()),
+        let embeddings = match &self.runner {
+            Runner::Server { agent, url } => embed_on_server(agent, url, texts)?,
+            Runner::Local(session) => embed_locally(&mut session.lock().unwrap(), texts)?,
         };
-
-        let mut data = response.data;
-        if data.len() != texts.len() {
-            bail!("expected {} embeddings, got {}", texts.len(), data.len());
-        }
-        data.sort_by_key(|d| d.index);
-        Ok(data.into_iter().map(|d| normalized(d.embedding)).collect())
+        Ok(embeddings.into_iter().map(normalized).collect())
     }
 
     /// Returns the L2-normalized embedding of a search query.
@@ -159,11 +129,68 @@ impl Embedder {
     }
 }
 
-fn new_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(600))
-        .build()
+fn embed_on_server(agent: &ureq::Agent, url: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    let response = agent
+        .post(&format!("{url}/v1/embeddings"))
+        .send_json(json!({ "input": texts }));
+    let response: EmbeddingResponse = match response {
+        Ok(r) => r.into_json()?,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            bail!("embedding server returned {code}: {body}");
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut data = response.data;
+    if data.len() != texts.len() {
+        bail!("expected {} embeddings, got {}", texts.len(), data.len());
+    }
+    data.sort_by_key(|d| d.index);
+    Ok(data.into_iter().map(|d| d.embedding).collect())
+}
+
+fn embed_locally(session: &mut Session, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    let (model, ctx) = session.parts();
+    let vocab = model.vocab();
+    let tokens: Vec<Vec<LlamaToken>> = texts
+        .iter()
+        .map(|text| {
+            let mut tokens = vocab.tokenize(text.as_bytes(), true, false);
+            tokens.truncate(BATCH_TOKENS);
+            tokens
+        })
+        .collect();
+
+    let mut embeddings = Vec::with_capacity(texts.len());
+    let mut batch = LlamaBatch::new(BATCH_TOKENS, 1);
+    let mut start = 0;
+    while start < tokens.len() {
+        let mut end = start;
+        let mut n_tokens = 0;
+        while end < tokens.len()
+            && end - start < BATCH_SEQS
+            && n_tokens + tokens[end].len() <= BATCH_TOKENS
+        {
+            n_tokens += tokens[end].len();
+            end += 1;
+        }
+
+        batch.clear();
+        for (seq, t) in tokens[start..end].iter().enumerate() {
+            batch.add_sequence(t, seq as i32, false)?;
+        }
+        ctx.clear_kv_cache_seq(None, None, None)?;
+        ctx.decode(&mut batch)?;
+        for seq in 0..end - start {
+            let embedding = ctx
+                .embeddings_seq_ith(seq as i32)
+                .map_err(|e| anyhow!("{e}"))?;
+            embeddings.push(embedding.to_vec());
+        }
+        start = end;
+    }
+    Ok(embeddings)
 }
 
 /// Returns the canonical name of the first model served at url.
@@ -205,101 +232,6 @@ fn normalized(mut v: Vec<f32>) -> Vec<f32> {
         v.iter_mut().for_each(|x| *x /= norm);
     }
     v
-}
-
-fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
-}
-
-/// Where a private server runs the model
-#[derive(Clone, Copy)]
-enum Device {
-    Gpu,
-    Cpu,
-}
-
-/// A llama-server child process, killed on drop.
-struct Server {
-    child: Mutex<Child>,
-    /// Most recent lines of server output
-    log: Arc<Mutex<VecDeque<String>>>,
-}
-
-impl Server {
-    fn spawn(model: &str, port: u16, device: Device) -> Result<Self> {
-        let bin = env::var("NNGREP_LLAMA_SERVER").unwrap_or_else(|_| "llama-server".into());
-        let mut cmd = Command::new(&bin);
-        if Path::new(model).is_file() {
-            cmd.arg("-m").arg(model);
-        } else {
-            cmd.arg("-hf").arg(model);
-        }
-        // A single slot is faster than batching sequences across slots
-        cmd.args(["--embedding", "--pooling", "last"])
-            .args(["-c", "2048", "-np", "1", "-b", "2048", "-ub", "2048"])
-            .args(["--host", "127.0.0.1", "--port", &port.to_string()]);
-        match device {
-            Device::Gpu => cmd.args(["-ngl", "999"]),
-            // Warming up costs more than it saves on a single query
-            Device::Cpu => cmd.args(["-dev", "none", "--no-warmup"]),
-        };
-        if let Ok(extra) = env::var("NNGREP_SERVER_ARGS") {
-            cmd.args(extra.split_whitespace());
-        }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        #[cfg(target_os = "linux")]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                Ok(())
-            });
-        }
-
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to start {bin}"))?;
-        let log = Arc::new(Mutex::new(VecDeque::new()));
-        collect_lines(child.stdout.take().unwrap(), log.clone());
-        collect_lines(child.stderr.take().unwrap(), log.clone());
-        Ok(Server {
-            child: Mutex::new(child),
-            log,
-        })
-    }
-
-    fn check_alive(&self) -> Result<()> {
-        if let Some(status) = self.child.lock().unwrap().try_wait()? {
-            thread::sleep(Duration::from_millis(100)); // let the log readers catch up
-            let log = self.log.lock().unwrap();
-            let tail: Vec<&str> = log.iter().map(String::as_str).collect();
-            bail!("llama-server exited with {status}:\n{}", tail.join("\n"));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let child = self.child.get_mut().unwrap();
-        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-        let _ = child.wait();
-    }
-}
-
-fn collect_lines(stream: impl Read + Send + 'static, log: Arc<Mutex<VecDeque<String>>>) {
-    thread::spawn(move || {
-        for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            let mut log = log.lock().unwrap();
-            if log.len() == LOG_LINES {
-                log.pop_front();
-            }
-            log.push_back(line);
-        }
-    });
 }
 
 #[cfg(test)]
