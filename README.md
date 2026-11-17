@@ -83,7 +83,7 @@ The options follow ripgrep where they apply:
 | `-m NUM`                   | At most `NUM` chunks per file                                    |
 | `--min-score SCORE`        | Only show chunks with at least this score                        |
 | `--rerank`                 | Rank the best chunks again with a reranker (see below)           |
-| `--rerank-depth NUM`       | Number of chunks to rerank, at least `-k` (default 30)           |
+| `--rerank-depth NUM`       | Chunks to rerank from each search, at least `-k` (default 30)    |
 | `-l`, `-0`                 | Only print the paths of the best matching files (NUL-separated)  |
 | `-q`                       | Print nothing; only set the exit status                          |
 | `-g GLOB`                  | Include or exclude (`!GLOB`) files, like ripgrep                 |
@@ -100,16 +100,24 @@ anything was found, 1 if nothing was and 2 if an error occurred.
 
 ### Reranking
 
-With `--rerank`, nngrep takes the best chunks by cosine similarity and ranks
-them again with [Qwen3-Reranker-4B](https://huggingface.co/Qwen/Qwen3-Reranker-4B),
-which reads each chunk together with the query. Scores are then the reranker's
-estimate that a chunk is what the query asks for, from 0 to 1.
+With `--rerank`, nngrep takes the best chunks by cosine similarity, adds the
+best chunks by keyword search, and ranks them all again with
+[Qwen3-Reranker-4B](https://huggingface.co/Qwen/Qwen3-Reranker-4B), which reads
+each chunk together with the query. Scores are then the reranker's estimate that
+a chunk is what the query asks for, from 0 to 1.
+
+The keyword search ranks chunks by [BM25](https://en.wikipedia.org/wiki/Okapi_BM25),
+matching stemmed English words, the parts of `camelCase` and `snake_case`
+identifiers, and whole identifiers. It finds chunks that the embedding misses,
+such as those with an exact error message or function name. It reads every file
+searched, which takes about half a second per 100,000 chunks on 16 threads.
 
 The reranker runs in process, after the embedding model has been unloaded. On
 first use it downloads `Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q8_0` (about
 4 GB), a llama.cpp conversion of Qwen's model, since Qwen publishes none. It
 uses about 6.5 GB of GPU memory and takes about 2 seconds for 30 chunks on an
-RX 7900 XT, plus the time to load it. On smaller machines,
+RX 7900 XT, plus the time to load it, so up to 4 seconds with the default
+`--rerank-depth`. On smaller machines,
 `NNGREP_RERANK_MODEL=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` is about 5 times
 faster but ranks less well.
 

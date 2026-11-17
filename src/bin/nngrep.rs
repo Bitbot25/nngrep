@@ -5,6 +5,7 @@ use half::slice::HalfFloatSliceExt;
 use ignore::Match;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::{Types, TypesBuilder};
+use nngrep::bm25::Bm25;
 use nngrep::chunk::{MAX_BYTES, truncate};
 use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, Index};
@@ -60,11 +61,13 @@ struct Args {
     min_score: f32,
 
     /// Rank the best chunks again with a reranker model, which reads each
-    /// chunk together with the query. Scores are then the reranker's.
+    /// chunk together with the query. The chunks are the best by similarity
+    /// and the best by keyword search (BM25). Scores are then the reranker's.
     #[arg(long)]
     rerank: bool,
 
-    /// Number of chunks to rerank, if more than the number of results
+    /// Number of chunks to rerank from each of similarity and keyword search,
+    /// if more than the number of results
     #[arg(long, value_name = "NUM", default_value_t = 30, requires = "rerank")]
     rerank_depth: usize,
 
@@ -293,7 +296,15 @@ fn run(args: Args) -> Result<Outcome> {
     let mut hits = score(&candidates, &query_vectors);
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
     if args.rerank {
-        hits.truncate(args.rerank_depth.max(args.top));
+        let depth = args.rerank_depth.max(args.top);
+        hits.truncate(depth);
+        let seen: HashSet<(usize, u32)> =
+            hits.iter().map(|h| (h.candidate, h.span.start)).collect();
+        hits.extend(
+            keyword_hits(&candidates, &sources, &queries, depth)
+                .into_iter()
+                .filter(|h| !seen.contains(&(h.candidate, h.span.start))),
+        );
         let device = if args.cpu { Device::Cpu } else { Device::Gpu };
         hits = rerank(hits, &queries, &candidates, &sources, device)?;
     }
@@ -450,6 +461,60 @@ fn score(candidates: &[Candidate], queries: &[Vec<f32>]) -> Vec<Hit> {
         .collect()
 }
 
+/// Returns the chunks of the candidates that score among the best num for any
+/// of the queries by BM25, best first. Files changed since indexing are skipped.
+fn keyword_hits(
+    candidates: &[Candidate],
+    sources: &[Source],
+    queries: &[String],
+    num: usize,
+) -> Vec<Hit> {
+    let bm25 = Bm25::new(queries);
+    let (chunks, counts): (Vec<(usize, ChunkSpan)>, Vec<_>) = candidates
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, c)| {
+            let path = sources[c.source].root.join(&c.file.path);
+            let Some(text) = read_if_current(&path, c.file) else {
+                return Vec::new();
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            c.file
+                .chunks
+                .iter()
+                .map(|&span| ((i, span), bm25.count(&span_text(&lines, span))))
+                .collect::<Vec<_>>()
+        })
+        .unzip();
+
+    let mut best: Vec<f32> = vec![0.0; chunks.len()];
+    for scores in bm25.scores(&counts) {
+        let mut order: Vec<usize> = (0..chunks.len()).filter(|&i| scores[i] > 0.0).collect();
+        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+        for &i in order.iter().take(num) {
+            best[i] = best[i].max(scores[i]);
+        }
+    }
+    let mut order: Vec<usize> = (0..chunks.len()).filter(|&i| best[i] > 0.0).collect();
+    order.sort_by(|&a, &b| best[b].total_cmp(&best[a]));
+    order
+        .into_iter()
+        .map(|i| Hit {
+            score: best[i],
+            candidate: chunks[i].0,
+            span: chunks[i].1,
+        })
+        .collect()
+}
+
+/// Returns the text of the chunk at span, as it was embedded, from the lines
+/// of its file.
+fn span_text(lines: &[&str], span: ChunkSpan) -> String {
+    let start = (span.start as usize - 1).min(lines.len());
+    let end = (span.end as usize).min(lines.len());
+    truncate(&lines[start..end].join("\n"), MAX_BYTES).to_string()
+}
+
 /// Returns the hits scored by their best relevance to the queries according to
 /// the reranker, best first. Hits in files changed since indexing are dropped.
 fn rerank(
@@ -473,12 +538,8 @@ fn rerank(
             text
         });
         let Some(text) = text else { continue };
-        let lines: Vec<&str> = text
-            .lines()
-            .skip(hit.span.start as usize - 1)
-            .take((hit.span.end - hit.span.start + 1) as usize)
-            .collect();
-        documents.push(truncate(&lines.join("\n"), MAX_BYTES).to_string());
+        let lines: Vec<&str> = text.lines().collect();
+        documents.push(span_text(&lines, hit.span));
         kept.push(hit);
     }
 
