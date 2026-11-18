@@ -1,0 +1,36 @@
+# Queries over ~/dev/tldr and the lines their answers start at. A query is
+# answered by any chunk that contains one of its lines.
+#
+# Names and identifier-style lookups
+tldr schema struct	include/tldr/tldr.h:162
+schema table struct	include/tldr/tldr.h:152
+schema column struct	include/tldr/tldr.h:145
+request node struct	include/tldr/tldr.h:226
+cursor options struct	include/tldr/tldr.h:334
+filter operators enum	include/tldr/tldr.h:168
+tldr_cursor struct	src/cursor.c:80
+sql_buf struct	src/sqlite_sql.h:49
+source vtable	src/source.h:88
+schematree free	src/schematree.c:150
+# Natural language
+quote an SQL identifier	src/sqlite_sql.c:64
+checked integer multiplication with overflow	src/tldr.c:60
+error code to message string	src/tldr.c:160
+roll back the transaction when a write fails	src/sqlite.c:525 src/sqlite.c:559
+create missing tables in the sqlite database	src/sqlite.c:711 src/sqlite.c:737
+lower an EXISTS filter term to an SQL subquery	src/sqlite_lower.c:320
+SQL condition lowering	src/sqlite_lower.c:342
+push NOT down to the comparisons	src/sqlite_lower.c:338
+lay out column buffers in column-major order	src/layout.c:7
+check that every request node is reachable	src/querytree.c:604
+transpose values between row-major and column-major	src/cursor.c:487
+column and table names must be unique within a table	src/schematree.c:40 src/schematree.c:57
+virtual table that passes join keys to sqlite	src/sqlite_keys.c:30
+# Documentation
+build with address and undefined behaviour sanitizers	AGENTS.md:34
+can I return from inside an SQL builder macro	AGENTS.md:259
+how should errors be reported instead of crashing	AGENTS.md:252
+how NOT treats NULL values in filters	docs/query-design.md:285
+limit applies to each parent's rows	docs/query-design.md:293
+why named sets with union and intersection were rejected	docs/query-design.md:567
+how long block data stays valid after the next pull	spec.md:570

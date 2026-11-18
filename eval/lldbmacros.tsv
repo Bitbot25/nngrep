@@ -1,0 +1,20 @@
+# Queries over a subset of xnu's tools/lldbmacros (Python): core/*.py, utils.py,
+# macho.py, kevent.py, turnstile.py, workqueue.py, structanalyze.py, kdp.py
+# and ktrace.py, with core/ kept as a subdirectory.
+#
+# Names and identifier-style lookups
+KDEvent class	ktrace.py:266
+IndentScope class	core/standard.py:31
+Logger class	utils.py:176
+turnstile summary	turnstile.py:9
+# Natural language
+get the containing struct from a pointer to one of its fields	utils.py:143
+format a byte count as KB, MB or GB	utils.py:196
+strip the pointer authentication code from a pointer	utils.py:495
+cached data that is dropped when the debugger session changes	core/caching.py:101 core/caching.py:135
+write a 64-bit integer to a memory address	utils.py:228
+iterate over all knotes of a process	kevent.py:79
+print the padding and member offsets of a struct	structanalyze.py:42 structanalyze.py:189
+send a kernel core dump over KDP	kdp.py:70
+access struct fields as attributes of a C value	core/cvalue.py:87
+find the text segment of a Mach-O file	macho.py:138

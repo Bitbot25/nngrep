@@ -56,9 +56,12 @@ vLLM reserves 90% of GPU memory by default; lower it with `--gpu-memory-utilizat
 nnindex [DIR] [--force] [--max-file-size BYTES] [--batch-size N] [--cpu]
 ```
 
-Splits every text file in `DIR` into chunks of up to 20 lines, ending at blank
-lines where possible, and embeds them. Hidden files, binary files, non-UTF-8
-files and anything ignored by git are skipped. The index is stored in `DIR/.nngrep`.
+Splits every text file in `DIR` into chunks of up to 20 lines and embeds them.
+Chunks follow the layout of the text rather than its language: a paragraph
+that starts no deeper than the block before it starts a new block, such as a
+function, a struct or a section of prose, and each block gets its own chunks.
+Hidden files, binary files, non-UTF-8 files and anything ignored by git are
+skipped. The index is stored in `DIR/.nngrep`.
 
 Re-running `nnindex` only embeds files whose size or modification time changed.
 Progress is saved every 30 seconds, so an interrupted run resumes where it stopped.

@@ -1,0 +1,19 @@
+# Queries over SvelteKit's packages/kit/src/runtime/server (JavaScript).
+#
+# Names and identifier-style lookups
+Csp class	page/csp.js:327
+BaseProvider class	page/csp.js:27
+sha256 function	page/crypto.js:8
+get cookies function	cookie.js:33
+# Natural language
+generate a random nonce for the content security policy	page/csp.js:6
+check whether a cookie domain matches a hostname	cookie.js:249
+which HTTP methods an endpoint module allows	utils.js:39
+respond with 405 method not allowed	utils.js:27
+read a stream into a string	page/load_data.js:387
+swap the byte order of words	page/crypto.js:147
+base64 encode bytes	page/crypto.js:210
+serialize fetched responses into the page for hydration	page/serialize_data.js:43
+call a named form action	page/actions.js:221
+validate response headers	validate-headers.js:53
+is the value a plain object	utils.js:12

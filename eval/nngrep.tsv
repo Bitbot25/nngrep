@@ -1,0 +1,19 @@
+# Queries over nngrep's own source at commit a38f03c (Rust, Emacs Lisp and
+# Markdown), as extracted by git archive.
+#
+# Names and identifier-style lookups
+Embedder struct	src/embed.rs:33
+Bm25 struct	src/bm25.rs:19
+FileFilter struct	src/bin/nngrep.rs:392
+canonical model name	src/embed.rs:212
+# Natural language
+split camelCase and snake_case identifiers into words	src/bm25.rs:160
+score documents against a query with the reranker	src/rerank.rs:67
+skip files that changed since they were indexed	src/bin/nngrep.rs:667
+write a file atomically	src/index.rs:122
+find the index that covers a path	src/index.rs:85
+parse nngrep output into hits in Emacs	emacs/nngrep.el:193
+highlight result text with the file's major mode	emacs/nngrep.el:279
+run vLLM on an AMD GPU	README.md:41
+how much GPU memory the reranker uses	README.md:118
+resume an interrupted indexing run	README.md:64
