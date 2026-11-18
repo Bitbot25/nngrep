@@ -8,7 +8,7 @@ use std::env;
 use std::num::NonZeroU32;
 
 /// Model loaded unless NNGREP_RERANK_MODEL is set
-pub const DEFAULT_RERANK_MODEL: &str = "Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q8_0";
+pub const DEFAULT_RERANK_MODEL: &str = "Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q4_0";
 
 const SYSTEM: &str = "<|im_start|>system\nJudge whether the Document meets the requirements \
                       based on the Query and the Instruct provided. Note that the answer can \
@@ -23,6 +23,10 @@ const MAX_PREFIX_TOKENS: usize = 1024;
 /// Maximum number of document tokens decoded at once. Longer documents are
 /// truncated.
 const BATCH_TOKENS: usize = 2048;
+
+/// Maximum number of tokens computed at once. llama.cpp reserves memory for
+/// the logits of each (about 0.6 MB per token).
+const UBATCH_TOKENS: usize = 512;
 
 /// Maximum number of documents decoded at once
 const BATCH_SEQS: usize = 16;
@@ -40,7 +44,7 @@ impl Reranker {
         let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new((MAX_PREFIX_TOKENS + BATCH_TOKENS) as u32))
             .with_n_batch(BATCH_TOKENS as u32)
-            .with_n_ubatch(BATCH_TOKENS as u32)
+            .with_n_ubatch(UBATCH_TOKENS as u32)
             .with_n_seq_max(BATCH_SEQS as u32 + 1)
             .with_kv_unified(true)
             .with_embeddings(true)

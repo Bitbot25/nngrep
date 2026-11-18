@@ -68,7 +68,7 @@ struct Args {
 
     /// Number of chunks to rerank from each of similarity and keyword search,
     /// if more than the number of results
-    #[arg(long, value_name = "NUM", default_value_t = 30, requires = "rerank")]
+    #[arg(long, value_name = "NUM", default_value_t = 15, requires = "rerank")]
     rerank_depth: usize,
 
     /// Only print the paths of the best matching files

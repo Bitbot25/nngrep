@@ -83,7 +83,7 @@ The options follow ripgrep where they apply:
 | `-m NUM`                   | At most `NUM` chunks per file                                    |
 | `--min-score SCORE`        | Only show chunks with at least this score                        |
 | `--rerank`                 | Rank the best chunks again with a reranker (see below)           |
-| `--rerank-depth NUM`       | Chunks to rerank from each search, at least `-k` (default 30)    |
+| `--rerank-depth NUM`       | Chunks to rerank from each search, at least `-k` (default 15)    |
 | `-l`, `-0`                 | Only print the paths of the best matching files (NUL-separated)  |
 | `-q`                       | Print nothing; only set the exit status                          |
 | `-g GLOB`                  | Include or exclude (`!GLOB`) files, like ripgrep                 |
@@ -113,13 +113,14 @@ such as those with an exact error message or function name. It reads every file
 searched, which takes about 0.15 seconds per 100,000 chunks on 16 threads.
 
 The reranker runs in process, after the embedding model has been unloaded. On
-first use it downloads `Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q8_0` (about
-4 GB), a llama.cpp conversion of Qwen's model, since Qwen publishes none. It
-uses about 6.5 GB of GPU memory and takes about 2 seconds for 30 chunks on an
-RX 7900 XT, plus the time to load it, so up to 4 seconds with the default
-`--rerank-depth`. On smaller machines,
-`NNGREP_RERANK_MODEL=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` is about 5 times
-faster but ranks less well.
+first use it downloads `Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q4_0` (about
+2.4 GB), a llama.cpp conversion of Qwen's model, since Qwen publishes none; the
+`Q8_0` file is twice the size but ranks no better. The reranker uses about 3 GB
+of GPU memory and, with the default `--rerank-depth`, adds about 3 seconds to a
+search on an RX 7900 XT. Its time grows with the number of chunks reranked,
+and on slower GPUs that dominates. On those,
+`NNGREP_RERANK_MODEL=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` needs about an
+eighth of the computation, but ranks less well.
 
 ## Configuration
 
