@@ -122,6 +122,22 @@ and on slower GPUs that dominates. On those,
 `NNGREP_RERANK_MODEL=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` needs about an
 eighth of the computation, but ranks less well.
 
+## Emacs
+
+`emacs/nngrep.el` runs searches from Emacs (29.1 or later):
+
+```elisp
+(use-package nngrep
+  :load-path "~/src/nngrep/emacs"
+  :bind ("C-c n" . nngrep-menu))
+```
+
+`M-x nngrep` searches the index covering the current directory, or offers to
+build one for the current project. In the results, `RET` visits the line at
+point, `n` and `p` step through the chunks, `TAB` folds one, `s` searches for
+something else and `?` opens a menu with nngrep's options. `M-g n` and `M-g p`
+step through the results from any buffer. `C-h m` lists every key.
+
 ## Configuration
 
 | Variable              | Meaning                                                            |
