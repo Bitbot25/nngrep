@@ -1,4 +1,5 @@
 use rust_stemmers::{Algorithm, Stemmer};
+use std::collections::HashMap;
 
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
@@ -67,21 +68,16 @@ impl Bm25 {
 
     /// Counts the words of a chunk.
     pub fn count(&self, text: &str) -> Counts {
-        let mut counts = Counts {
-            len: 0,
-            tf: vec![0; self.terms.len()],
-        };
-        let mut lower = String::new();
-        split_words(text, |word| {
-            counts.len += 1;
-            lower.clear();
-            lower.extend(word.chars().flat_map(char::to_lowercase));
-            let term = self.stemmer.stem(&lower);
-            if let Ok(i) = self.terms.binary_search_by(|t| t.as_str().cmp(&term)) {
-                counts.tf[i] += 1;
-            }
-        });
-        counts
+        self.counter().count(text)
+    }
+
+    /// Returns a counter of words in chunks, for counting many chunks.
+    pub fn counter(&self) -> Counter<'_> {
+        Counter {
+            bm25: self,
+            terms: HashMap::new(),
+            lower: String::new(),
+        }
     }
 
     /// Returns the score of each chunk for each query, taking the chunks as
@@ -117,6 +113,45 @@ impl Bm25 {
     }
 }
 
+/// Counts the words of chunks for Bm25, remembering which query term each
+/// distinct word is.
+pub struct Counter<'a> {
+    bm25: &'a Bm25,
+    /// Index into the query terms of each word seen, if it is one
+    terms: HashMap<String, Option<usize>>,
+    /// Buffer for a lowercased word
+    lower: String,
+}
+
+impl Counter<'_> {
+    /// Counts the words of a chunk.
+    pub fn count(&mut self, text: &str) -> Counts {
+        let bm25 = self.bm25;
+        let mut counts = Counts {
+            len: 0,
+            tf: vec![0; bm25.terms.len()],
+        };
+        split_words(text, |word| {
+            counts.len += 1;
+            let term = match self.terms.get(word) {
+                Some(&term) => term,
+                None => {
+                    self.lower.clear();
+                    self.lower.extend(word.chars().flat_map(char::to_lowercase));
+                    let stem = bm25.stemmer.stem(&self.lower);
+                    let term = bm25.terms.binary_search_by(|t| t.as_str().cmp(&stem)).ok();
+                    self.terms.insert(word.to_string(), term);
+                    term
+                }
+            };
+            if let Some(i) = term {
+                counts.tf[i] += 1;
+            }
+        });
+        counts
+    }
+}
+
 /// Calls f with each word of text. Words are runs of letters and digits,
 /// split before an uppercase letter that follows a lowercase letter or digit,
 /// or that follows an uppercase letter and precedes a lowercase one. An
@@ -124,9 +159,16 @@ impl Bm25 {
 /// ("parse_HTTPHeader" gives "parse_HTTPHeader", "parse", "HTTP" and "Header").
 fn split_words(text: &str, mut f: impl FnMut(&str)) {
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut parts = Vec::new();
     for ident in text.split(|c: char| !is_ident(c)) {
         let ident = ident.trim_matches('_');
-        let mut parts = Vec::new();
+        if ident.is_empty() {
+            continue;
+        }
+        if !ident.contains('_') && !ident.chars().skip(1).any(char::is_uppercase) {
+            f(ident);
+            continue;
+        }
         for run in ident.split('_').filter(|r| !r.is_empty()) {
             let mut start = 0;
             let mut prev = ' ';
@@ -147,7 +189,7 @@ fn split_words(text: &str, mut f: impl FnMut(&str)) {
         if parts.len() > 1 {
             f(ident);
         }
-        parts.into_iter().for_each(&mut f);
+        parts.drain(..).for_each(&mut f);
     }
 }
 
@@ -188,6 +230,20 @@ mod tests {
         let counts = bm25.count("fn retryUpload() { // Retries a failing upload");
         assert_eq!(counts.len, 8);
         assert_eq!(counts.tf, [1, 2, 2]);
+    }
+
+    #[test]
+    fn reused_counter_counts_like_a_new_one() {
+        let bm25 = Bm25::new(&["retry failed uploads".into()]);
+        let mut counter = bm25.counter();
+        for text in [
+            "retry the upload",
+            "Retries failed; upload_retry",
+            "nothing here",
+        ] {
+            let (reused, new) = (counter.count(text), bm25.count(text));
+            assert_eq!((reused.len, reused.tf), (new.len, new.tf), "{text}");
+        }
     }
 
     #[test]

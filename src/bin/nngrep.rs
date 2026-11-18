@@ -473,18 +473,22 @@ fn keyword_hits(
     let (chunks, counts): (Vec<(usize, ChunkSpan)>, Vec<_>) = candidates
         .par_iter()
         .enumerate()
-        .flat_map_iter(|(i, c)| {
-            let path = sources[c.source].root.join(&c.file.path);
-            let Some(text) = read_if_current(&path, c.file) else {
-                return Vec::new();
-            };
-            let lines: Vec<&str> = text.lines().collect();
-            c.file
-                .chunks
-                .iter()
-                .map(|&span| ((i, span), bm25.count(&span_text(&lines, span))))
-                .collect::<Vec<_>>()
-        })
+        .map_init(
+            || bm25.counter(),
+            |counter, (i, c)| {
+                let path = sources[c.source].root.join(&c.file.path);
+                let Some(text) = read_if_current(&path, c.file) else {
+                    return Vec::new();
+                };
+                let lines: Vec<&str> = text.lines().collect();
+                c.file
+                    .chunks
+                    .iter()
+                    .map(|&span| ((i, span), counter.count(&span_text(&lines, span))))
+                    .collect::<Vec<_>>()
+            },
+        )
+        .flatten_iter()
         .unzip();
 
     let mut best: Vec<f32> = vec![0.0; chunks.len()];

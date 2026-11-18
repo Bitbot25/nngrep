@@ -110,7 +110,7 @@ The keyword search ranks chunks by [BM25](https://en.wikipedia.org/wiki/Okapi_BM
 matching stemmed English words, the parts of `camelCase` and `snake_case`
 identifiers, and whole identifiers. It finds chunks that the embedding misses,
 such as those with an exact error message or function name. It reads every file
-searched, which takes about half a second per 100,000 chunks on 16 threads.
+searched, which takes about 0.15 seconds per 100,000 chunks on 16 threads.
 
 The reranker runs in process, after the embedding model has been unloaded. On
 first use it downloads `Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q8_0` (about
