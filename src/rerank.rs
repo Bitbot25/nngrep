@@ -1,13 +1,14 @@
 use crate::embed::Embedder;
 use crate::gguf;
-use crate::llama::Session;
+use crate::llama::{BATCH_TOKENS, CONTEXT_TOKENS, LocalModel, MAX_SEQS, Priority};
 use anyhow::{Context, Result, anyhow, bail};
-use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 use std::env;
-use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const SYSTEM: &str = "<|im_start|>system\nJudge whether the Document meets the requirements \
                       based on the Query and the Instruct provided. Note that the answer can \
@@ -16,26 +17,22 @@ const INSTRUCT: &str = "Given a search query about a codebase, judge whether the
                         passage is what the query is looking for";
 
 /// Maximum number of tokens in the prompt before a document
-const MAX_PREFIX_TOKENS: usize = 1024;
-
-/// Maximum number of document tokens decoded at once. Longer documents are
-/// truncated.
-const BATCH_TOKENS: usize = 2048;
-
-/// Maximum number of tokens computed at once
-const UBATCH_TOKENS: usize = 512;
+const MAX_PREFIX_TOKENS: usize = CONTEXT_TOKENS - BATCH_TOKENS;
 
 /// Maximum number of documents decoded at once
 const BATCH_SEQS: usize = 16;
+const _: () = assert!(BATCH_SEQS < MAX_SEQS);
 
 /// A reranker that runs Qwen3-Embedding-4B with an adapter approximating
 /// Qwen3-Reranker-4B.
 ///
 /// The adapter is the LoRA GGUF file at NNGREP_RERANK_ADAPTER, whose metadata
 /// holds the head (`rerank.head`) and the suffix (`rerank.suffix`), as f32
-/// arrays.
+/// arrays. The adapter is only enabled while reranking, so the model keeps
+/// embedding as before.
 pub struct Reranker {
-    session: Session,
+    model: Arc<LocalModel>,
+    adapter: PathBuf,
     /// Weights of the relevance logit over the model's output
     head: Vec<f32>,
     /// Input embeddings of the end of the prompt, one per token
@@ -46,7 +43,7 @@ impl Reranker {
     /// Creates a reranker from the embedding model of embedder, which must be
     /// Qwen3-Embedding-4B. If embedder runs the model on a server, the model
     /// is loaded in process on the GPU.
-    pub fn new(embedder: Embedder) -> Result<Self> {
+    pub fn new(embedder: &Embedder) -> Result<Self> {
         let adapter: PathBuf = env::var_os("NNGREP_RERANK_ADAPTER")
             .context("NNGREP_RERANK_ADAPTER is not set")?
             .into();
@@ -58,8 +55,8 @@ impl Reranker {
         };
         let head = take("rerank.head")?;
         let suffix = take("rerank.suffix")?;
-        let mut model = embedder.into_local_model()?;
-        let n_embd = model.n_embd() as usize;
+        let model = embedder.local_model()?;
+        let n_embd = model.n_embd();
         if head.len() != n_embd
             || suffix.is_empty()
             || !suffix.len().is_multiple_of(n_embd)
@@ -67,22 +64,11 @@ impl Reranker {
         {
             bail!("{} does not match the embedding model", adapter.display());
         }
-        let mut lora = model
-            .lora_adapter_init(&adapter)
-            .with_context(|| format!("loading {}", adapter.display()))?;
-
-        let params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new((MAX_PREFIX_TOKENS + BATCH_TOKENS) as u32))
-            .with_n_batch(BATCH_TOKENS as u32)
-            .with_n_ubatch(UBATCH_TOKENS as u32)
-            .with_n_seq_max(BATCH_SEQS as u32 + 1)
-            .with_kv_unified(true)
-            .with_embeddings(true)
-            .with_pooling_type(LlamaPoolingType::Last);
-        let mut session = Session::new(model, params)?;
-        session.parts().1.lora_adapter_set(&mut lora, 1.0)?;
+        // Loads the adapter
+        model.with_context(Priority::Urgent, Some(&adapter), |_, _| Ok(()))?;
         Ok(Reranker {
-            session,
+            model,
+            adapter,
             head,
             suffix,
         })
@@ -92,13 +78,25 @@ impl Reranker {
     ///
     /// The prompt up to the document is decoded once, and each document
     /// continues a copy of it.
-    pub fn score(&mut self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
+    pub fn score(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
+        self.model
+            .with_context(Priority::Urgent, Some(&self.adapter), |model, ctx| {
+                self.score_with(model, ctx, query, documents)
+            })
+    }
+
+    fn score_with(
+        &self,
+        model: &LlamaModel,
+        ctx: &mut LlamaContext,
+        query: &str,
+        documents: &[&str],
+    ) -> Result<Vec<f32>> {
         let n_embd = self.head.len();
         let n_suffix = self.suffix.len() / n_embd;
-        let (model, ctx) = self.session.parts();
         let vocab = model.vocab();
         let prefix = format!("{SYSTEM}<Instruct>: {INSTRUCT}\n<Query>: {query}\n<Document>:");
         let prefix = vocab.tokenize(prefix.as_bytes(), false, true);

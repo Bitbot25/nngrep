@@ -1,15 +1,12 @@
 use crate::hub;
-use crate::llama::{Device, Session, load_model};
+use crate::llama::{BATCH_TOKENS, Device, LocalModel, MAX_SEQS, Priority, UBATCH_TOKENS};
 use anyhow::{Context, Result, anyhow, bail};
-use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 use serde::Deserialize;
 use serde_json::json;
 use std::env;
-use std::num::NonZeroU32;
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Server used when NNGREP_SERVER is not set, if one is running there
@@ -21,13 +18,6 @@ pub const DEFAULT_MODEL: &str = "Qwen/Qwen3-Embedding-4B-GGUF:Q8_0";
 const QUERY_TASK: &str =
     "Given a search query, retrieve relevant code or text passages that match the query";
 
-/// Maximum number of tokens decoded at once by an in-process model. Longer
-/// texts are truncated.
-const BATCH_TOKENS: usize = 2048;
-
-/// Maximum number of texts decoded at once by an in-process model
-const BATCH_SEQS: usize = 64;
-
 /// An embedding model, either served by an OpenAI-compatible server such as
 /// vLLM, or loaded in process from NNGREP_MODEL (a GGUF path or a Hugging Face
 /// repository, default DEFAULT_MODEL).
@@ -38,7 +28,7 @@ pub struct Embedder {
 
 enum Runner {
     Server { agent: ureq::Agent, url: String },
-    Local(Mutex<Session>),
+    Local(Arc<LocalModel>),
 }
 
 #[derive(Deserialize)]
@@ -94,17 +84,9 @@ impl Embedder {
 
     fn load(device: Device) -> Result<Self> {
         let spec = local_model_spec();
-        let params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(BATCH_TOKENS as u32))
-            .with_n_batch(BATCH_TOKENS as u32)
-            .with_n_ubatch(BATCH_TOKENS as u32)
-            .with_n_seq_max(BATCH_SEQS as u32)
-            .with_kv_unified(true)
-            .with_embeddings(true)
-            .with_pooling_type(LlamaPoolingType::Last);
-        let session = Session::load(&hub::model_path(&spec)?, device, params)?;
+        let model = LocalModel::load(&hub::model_path(&spec)?, device)?;
         Ok(Embedder {
-            runner: Runner::Local(Mutex::new(session)),
+            runner: Runner::Local(Arc::new(model)),
             model: canonical_model_name(&spec),
         })
     }
@@ -114,30 +96,53 @@ impl Embedder {
         &self.model
     }
 
-    /// Returns the model loaded in process, or loads it on the GPU if it runs
-    /// on a server.
-    pub(crate) fn into_local_model(self) -> Result<Box<LlamaModel>> {
-        match self.runner {
-            Runner::Local(session) => Ok(session.into_inner().unwrap().into_model()),
-            Runner::Server { .. } => {
-                load_model(&hub::model_path(&local_model_spec())?, Device::Gpu)
-            }
+    /// Describes where the model runs, such as "the GPU (llama.cpp)".
+    pub fn location(&self) -> String {
+        match &self.runner {
+            Runner::Server { url, .. } => format!("the server at {url}"),
+            Runner::Local(model) if model.device() == Device::Cpu => "the CPU (llama.cpp)".into(),
+            Runner::Local(_) => "the GPU (llama.cpp)".into(),
         }
     }
 
-    /// Returns L2-normalized embeddings of documents, in order.
+    /// Returns the model loaded in process, or loads it on the GPU if it runs
+    /// on a server.
+    pub(crate) fn local_model(&self) -> Result<Arc<LocalModel>> {
+        match &self.runner {
+            Runner::Local(model) => Ok(model.clone()),
+            Runner::Server { .. } => Ok(Arc::new(LocalModel::load(
+                &hub::model_path(&local_model_spec())?,
+                Device::Gpu,
+            )?)),
+        }
+    }
+
+    /// Returns L2-normalized embeddings of documents, in order. An in-process
+    /// model gives search queries precedence over documents.
     pub fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let embeddings = match &self.runner {
-            Runner::Server { agent, url } => embed_on_server(agent, url, texts)?,
-            Runner::Local(session) => embed_locally(&mut session.lock().unwrap(), texts)?,
-        };
-        Ok(embeddings.into_iter().map(normalized).collect())
+        self.embed(texts, Priority::Background)
+    }
+
+    /// Returns the L2-normalized embeddings of search queries, in order.
+    pub fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>> {
+        let texts: Vec<String> = queries
+            .iter()
+            .map(|q| format!("Instruct: {QUERY_TASK}\nQuery:{q}"))
+            .collect();
+        self.embed(&texts, Priority::Urgent)
     }
 
     /// Returns the L2-normalized embedding of a search query.
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        let text = format!("Instruct: {QUERY_TASK}\nQuery:{query}");
-        Ok(self.embed_documents(&[text])?.remove(0))
+        Ok(self.embed_queries(&[query.to_string()])?.remove(0))
+    }
+
+    fn embed(&self, texts: &[String], priority: Priority) -> Result<Vec<Vec<f32>>> {
+        let embeddings = match &self.runner {
+            Runner::Server { agent, url } => embed_on_server(agent, url, texts)?,
+            Runner::Local(model) => embed_locally(model, texts, priority)?,
+        };
+        Ok(embeddings.into_iter().map(normalized).collect())
     }
 }
 
@@ -162,45 +167,56 @@ fn embed_on_server(agent: &ureq::Agent, url: &str, texts: &[String]) -> Result<V
     Ok(data.into_iter().map(|d| d.embedding).collect())
 }
 
-fn embed_locally(session: &mut Session, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    let (model, ctx) = session.parts();
-    let vocab = model.vocab();
-    let tokens: Vec<Vec<LlamaToken>> = texts
-        .iter()
-        .map(|text| {
-            let mut tokens = vocab.tokenize(text.as_bytes(), true, false);
-            tokens.truncate(BATCH_TOKENS);
-            tokens
-        })
-        .collect();
-
+/// Embeds texts with the model, taking turns with other callers between
+/// decodes. Each decode is at most UBATCH_TOKENS long, unless a single text is
+/// longer, so that urgent callers wait little. Texts longer than BATCH_TOKENS
+/// are truncated.
+fn embed_locally(
+    model: &LocalModel,
+    texts: &[String],
+    priority: Priority,
+) -> Result<Vec<Vec<f32>>> {
+    let mut tokens: Option<Vec<Vec<LlamaToken>>> = None;
     let mut embeddings = Vec::with_capacity(texts.len());
     let mut batch = LlamaBatch::new(BATCH_TOKENS, 1);
-    let mut start = 0;
-    while start < tokens.len() {
-        let mut end = start;
-        let mut n_tokens = 0;
-        while end < tokens.len()
-            && end - start < BATCH_SEQS
-            && n_tokens + tokens[end].len() <= BATCH_TOKENS
-        {
-            n_tokens += tokens[end].len();
-            end += 1;
-        }
+    while embeddings.len() < texts.len() {
+        model.with_context(priority, None, |model, ctx| {
+            let tokens = tokens.get_or_insert_with(|| {
+                let vocab = model.vocab();
+                texts
+                    .iter()
+                    .map(|text| {
+                        let mut tokens = vocab.tokenize(text.as_bytes(), true, false);
+                        tokens.truncate(BATCH_TOKENS);
+                        tokens
+                    })
+                    .collect()
+            });
+            let start = embeddings.len();
+            let mut end = start;
+            let mut n_tokens = 0;
+            while end < tokens.len()
+                && end - start < MAX_SEQS
+                && (end == start || n_tokens + tokens[end].len() <= UBATCH_TOKENS)
+            {
+                n_tokens += tokens[end].len();
+                end += 1;
+            }
 
-        batch.clear();
-        for (seq, t) in tokens[start..end].iter().enumerate() {
-            batch.add_sequence(t, seq as i32, false)?;
-        }
-        ctx.clear_kv_cache_seq(None, None, None)?;
-        ctx.decode(&mut batch)?;
-        for seq in 0..end - start {
-            let embedding = ctx
-                .embeddings_seq_ith(seq as i32)
-                .map_err(|e| anyhow!("{e}"))?;
-            embeddings.push(embedding.to_vec());
-        }
-        start = end;
+            batch.clear();
+            for (seq, t) in tokens[start..end].iter().enumerate() {
+                batch.add_sequence(t, seq as i32, false)?;
+            }
+            ctx.clear_kv_cache_seq(None, None, None)?;
+            ctx.decode(&mut batch)?;
+            for seq in 0..end - start {
+                let embedding = ctx
+                    .embeddings_seq_ith(seq as i32)
+                    .map_err(|e| anyhow!("{e}"))?;
+                embeddings.push(embedding.to_vec());
+            }
+            Ok(())
+        })?;
     }
     Ok(embeddings)
 }

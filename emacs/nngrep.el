@@ -715,8 +715,7 @@ else the current project.  With a prefix argument, ask for DIR."
     :reader transient-read-number-N+)
    ("-g" "Glob" "--glob=" :class transient-option :multi-value repeat)
    ("-t" "Only file type" "--type=" :class transient-option :multi-value repeat)
-   ("-T" "Skip file type" "--type-not=" :class transient-option :multi-value repeat)
-   ("-c" "Run on the CPU" "--cpu")]
+   ("-T" "Skip file type" "--type-not=" :class transient-option :multi-value repeat)]
   [["Search"
     ("s" "New search" nngrep)
     ("S" "New search in…" nngrep-menu-search-in)

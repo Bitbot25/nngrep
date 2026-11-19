@@ -83,7 +83,7 @@ fn main() -> Result<()> {
     let counts: Vec<_> = chunks.iter().map(|c| counter.count(&c.text)).collect();
     let bm25_scores = bm25.scores(&counts);
 
-    let mut reranker = rerank.then(|| Reranker::new(embedder)).transpose()?;
+    let reranker = rerank.then(|| Reranker::new(&embedder)).transpose()?;
 
     let mut ranks: [Vec<Option<usize>>; 3] = Default::default();
     println!("{:>5} {:>5} {:>6}  query", "cos", "bm25", "rerank");
@@ -110,7 +110,7 @@ fn main() -> Result<()> {
         let rank_in = |order: &[usize]| order.iter().position(|&i| is_answer(&chunks[i]));
 
         let mut top = Vec::new();
-        let reranked = match &mut reranker {
+        let reranked = match &reranker {
             Some(reranker) => {
                 let pool: Vec<usize> = by_cosine
                     .iter()

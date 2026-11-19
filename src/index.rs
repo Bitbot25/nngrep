@@ -2,13 +2,18 @@ use anyhow::{Context, Result, bail};
 use half::f16;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Directory holding the index, at the root of the indexed tree
 pub const INDEX_DIR: &str = ".nngrep";
 
+/// Files larger than this many bytes are not indexed, unless the index says
+/// otherwise
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 1 << 20;
+
 const META_FILE: &str = "index.json";
-const VECTORS_FILE: &str = "vectors.f16";
 const VERSION: u32 = 3;
 
 /// Embeddings of the text files in a directory tree.
@@ -18,6 +23,12 @@ pub struct Index {
     pub model: String,
     /// Embedding dimension
     pub dim: usize,
+    /// Files larger than this many bytes are not indexed
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size: u64,
+    /// Name of the file in the index directory that holds the vectors
+    #[serde(default = "default_vectors_file")]
+    vectors_file: String,
     pub files: Vec<FileEntry>,
     /// One vector per chunk, in file order. Stored as little-endian f16.
     #[serde(skip)]
@@ -48,6 +59,8 @@ impl Index {
             version: VERSION,
             model: model.into(),
             dim,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            vectors_file: default_vectors_file(),
             files: Vec::new(),
             vectors: Vec::new(),
         }
@@ -56,18 +69,28 @@ impl Index {
     /// Loads the index stored under root.
     pub fn load(root: &Path) -> Result<Self> {
         let dir = root.join(INDEX_DIR);
-        let meta = fs::read(dir.join(META_FILE))
-            .with_context(|| format!("reading index in {}", dir.display()))?;
-        let mut index: Index = serde_json::from_slice(&meta).context("parsing index")?;
-        if index.version != VERSION {
-            bail!(
-                "index in {} has version {}, expected {VERSION}; re-run nnindex",
-                dir.display(),
-                index.version
-            );
-        }
+        let mut attempts = 0;
+        let (mut index, bytes) = loop {
+            let meta = fs::read(dir.join(META_FILE))
+                .with_context(|| format!("reading index in {}", dir.display()))?;
+            let index: Index = serde_json::from_slice(&meta).context("parsing index")?;
+            if index.version != VERSION {
+                bail!(
+                    "index in {} has version {}, expected {VERSION}; re-run nnindex",
+                    dir.display(),
+                    index.version
+                );
+            }
+            match fs::read(dir.join(&index.vectors_file)) {
+                Ok(bytes) => break (index, bytes),
+                // Replaced by a save since reading META_FILE
+                Err(e) if e.kind() == io::ErrorKind::NotFound && attempts < 10 => attempts += 1,
+                Err(e) => {
+                    return Err(e).with_context(|| format!("reading index in {}", dir.display()));
+                }
+            }
+        };
 
-        let bytes = fs::read(dir.join(VECTORS_FILE))?;
         let (pairs, rest) = bytes.as_chunks::<2>();
         if !rest.is_empty() {
             bail!("index in {} is corrupt; re-run nnindex", dir.display());
@@ -89,15 +112,30 @@ impl Index {
             .with_context(|| format!("no index found for {}; run nnindex first", path.display()))
     }
 
-    /// Writes the index under root, replacing any existing one.
-    pub fn save(&self, root: &Path) -> Result<()> {
+    /// Writes the index under root, replacing any existing one. Readers of
+    /// the existing index never see a mix of the two.
+    pub fn save(&mut self, root: &Path) -> Result<()> {
         let dir = root.join(INDEX_DIR);
         fs::create_dir_all(&dir)?;
         fs::write(dir.join(".gitignore"), "*\n")?;
 
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        self.vectors_file = format!("vectors-{nanos:x}.f16");
         let bytes: Vec<u8> = self.vectors.iter().flat_map(|v| v.to_le_bytes()).collect();
-        write_atomic(&dir.join(VECTORS_FILE), &bytes)?;
-        write_atomic(&dir.join(META_FILE), &serde_json::to_vec(self)?)
+        fs::write(dir.join(&self.vectors_file), &bytes)?;
+        write_atomic(&dir.join(META_FILE), &serde_json::to_vec(self)?)?;
+
+        for entry in fs::read_dir(&dir)? {
+            let name = entry?.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("vectors") && name.ends_with(".f16") && name != self.vectors_file {
+                // Removed at the next save if this fails
+                let _ = fs::remove_file(dir.join(&*name));
+            }
+        }
+        Ok(())
     }
 
     /// Appends a file and the vectors of its chunks.
@@ -117,6 +155,25 @@ impl Index {
             (f, vectors)
         })
     }
+}
+
+/// Is the index path inside the directory or file at prefix, also an index
+/// path ("" for the root)?
+pub fn is_under(path: &str, prefix: &str) -> bool {
+    prefix.is_empty()
+        || path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn default_max_file_size() -> u64 {
+    DEFAULT_MAX_FILE_SIZE
+}
+
+/// Vectors file of indexes saved before vectors_file was recorded
+fn default_vectors_file() -> String {
+    "vectors.f16".into()
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {

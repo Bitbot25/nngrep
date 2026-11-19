@@ -25,7 +25,7 @@ fn main() -> Result<()> {
 
     let embedder = Embedder::connect()?;
     let start = Instant::now();
-    let mut reranker = Reranker::new(embedder)?;
+    let reranker = Reranker::new(&embedder)?;
     let created = start.elapsed();
 
     let start = Instant::now();

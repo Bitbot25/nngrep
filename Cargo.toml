@@ -10,6 +10,8 @@ clap = { version = "4", features = ["derive"] }
 half = { version = "2", features = ["std"] }
 ignore = "0.4"
 indicatif = "0.17"
+libc = "0.2"
+notify = "8"
 rayon = "1"
 rust-stemmers = "1.2"
 serde = { version = "1", features = ["derive"] }

@@ -7,10 +7,9 @@ use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::{Types, TypesBuilder};
 use nngrep::bm25::Bm25;
 use nngrep::chunk::{MAX_BYTES, truncate};
-use nngrep::embed::Embedder;
-use nngrep::index::{ChunkSpan, FileEntry, Index};
+use nngrep::index::{ChunkSpan, FileEntry, Index, is_under};
+use nngrep::ipc::Client;
 use nngrep::progress::spinner;
-use nngrep::rerank::Reranker;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -126,11 +125,6 @@ struct Args {
 
     #[arg(long, value_name = "WHEN", value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
-
-    /// Run the models in process on the CPU, even if an embedding server is
-    /// running
-    #[arg(long)]
-    cpu: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -266,17 +260,16 @@ fn run(args: Args) -> Result<Outcome> {
         });
     }
 
-    let loading = spinner("Loading embedding model");
-    let embedder = if args.cpu {
-        Embedder::load_on_cpu()?
-    } else {
-        Embedder::connect()?
+    let loading = spinner("{msg}");
+    loading.set_message("Embedding the query");
+    let mut client = match Client::connect_running()? {
+        Some(client) => client,
+        None => {
+            loading.set_message("Starting nngrepd");
+            Client::connect()?
+        }
     };
-    let model = embedder.model().to_string();
-    let query_vectors: Vec<Vec<f32>> = queries
-        .iter()
-        .map(|q| embedder.embed_query(q))
-        .collect::<Result<_>>()?;
+    let (model, query_vectors) = client.embed(&queries)?;
     loading.finish_and_clear();
 
     for source in &sources {
@@ -303,7 +296,7 @@ fn run(args: Args) -> Result<Outcome> {
                 .into_iter()
                 .filter(|h| !seen.contains(&(h.candidate, h.span.start))),
         );
-        hits = rerank(hits, &queries, &candidates, &sources, embedder)?;
+        hits = rerank(hits, &queries, &candidates, &sources, &mut client)?;
     }
     hits.retain(|h| h.score >= args.min_score);
 
@@ -374,15 +367,6 @@ impl Target {
             Some(given) => given.join(rest),
         }
     }
-}
-
-/// Is the index path inside the directory or file at prefix?
-fn is_under(path: &str, prefix: &str) -> bool {
-    prefix.is_empty()
-        || path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// File selection by --glob, --type and --type-not
@@ -517,14 +501,14 @@ fn span_text(lines: &[&str], span: ChunkSpan) -> String {
 }
 
 /// Returns the hits scored by their best relevance to the queries according to
-/// the reranker made from embedder, best first. Hits in files changed since
-/// indexing are dropped.
+/// nngrepd's reranker, best first. Hits in files changed since indexing are
+/// dropped.
 fn rerank(
     hits: Vec<Hit>,
     queries: &[String],
     candidates: &[Candidate],
     sources: &[Source],
-    embedder: Embedder,
+    client: &mut Client,
 ) -> Result<Vec<Hit>> {
     let mut texts: HashMap<usize, Option<String>> = HashMap::new();
     let mut kept = Vec::new();
@@ -546,11 +530,9 @@ fn rerank(
     }
 
     let loading = spinner("Reranking");
-    let mut reranker = Reranker::new(embedder)?;
-    let documents: Vec<&str> = documents.iter().map(String::as_str).collect();
     let mut relevance = vec![f32::NEG_INFINITY; kept.len()];
-    for query in queries {
-        for (best, r) in relevance.iter_mut().zip(reranker.score(query, &documents)?) {
+    for scores in client.rerank(queries, &documents)? {
+        for (best, r) in relevance.iter_mut().zip(scores) {
             *best = best.max(r);
         }
     }

@@ -4,6 +4,7 @@ pub mod embed;
 mod gguf;
 pub mod hub;
 pub mod index;
+pub mod ipc;
 pub mod llama;
 pub mod progress;
 pub mod rerank;
