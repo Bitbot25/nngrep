@@ -9,7 +9,6 @@ use nngrep::bm25::Bm25;
 use nngrep::chunk::{MAX_BYTES, truncate};
 use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, FileEntry, Index};
-use nngrep::llama::Device;
 use nngrep::progress::spinner;
 use nngrep::rerank::Reranker;
 use rayon::prelude::*;
@@ -279,7 +278,6 @@ fn run(args: Args) -> Result<Outcome> {
         .map(|q| embedder.embed_query(q))
         .collect::<Result<_>>()?;
     loading.finish_and_clear();
-    drop(embedder);
 
     for source in &sources {
         if source.index.model != model {
@@ -305,8 +303,7 @@ fn run(args: Args) -> Result<Outcome> {
                 .into_iter()
                 .filter(|h| !seen.contains(&(h.candidate, h.span.start))),
         );
-        let device = if args.cpu { Device::Cpu } else { Device::Gpu };
-        hits = rerank(hits, &queries, &candidates, &sources, device)?;
+        hits = rerank(hits, &queries, &candidates, &sources, embedder)?;
     }
     hits.retain(|h| h.score >= args.min_score);
 
@@ -520,13 +517,14 @@ fn span_text(lines: &[&str], span: ChunkSpan) -> String {
 }
 
 /// Returns the hits scored by their best relevance to the queries according to
-/// the reranker, best first. Hits in files changed since indexing are dropped.
+/// the reranker made from embedder, best first. Hits in files changed since
+/// indexing are dropped.
 fn rerank(
     hits: Vec<Hit>,
     queries: &[String],
     candidates: &[Candidate],
     sources: &[Source],
-    device: Device,
+    embedder: Embedder,
 ) -> Result<Vec<Hit>> {
     let mut texts: HashMap<usize, Option<String>> = HashMap::new();
     let mut kept = Vec::new();
@@ -548,7 +546,7 @@ fn rerank(
     }
 
     let loading = spinner("Reranking");
-    let mut reranker = Reranker::load(device)?;
+    let mut reranker = Reranker::new(embedder)?;
     let documents: Vec<&str> = documents.iter().map(String::as_str).collect();
     let mut relevance = vec![f32::NEG_INFINITY; kept.len()];
     for query in queries {

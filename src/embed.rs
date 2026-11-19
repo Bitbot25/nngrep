@@ -1,8 +1,9 @@
 use crate::hub;
-use crate::llama::{Device, Session};
+use crate::llama::{Device, Session, load_model};
 use anyhow::{Context, Result, anyhow, bail};
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 use serde::Deserialize;
 use serde_json::json;
@@ -92,7 +93,7 @@ impl Embedder {
     }
 
     fn load(device: Device) -> Result<Self> {
-        let spec = env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+        let spec = local_model_spec();
         let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(BATCH_TOKENS as u32))
             .with_n_batch(BATCH_TOKENS as u32)
@@ -111,6 +112,17 @@ impl Embedder {
     /// Name of the embedding model, independent of quantization and file format
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Returns the model loaded in process, or loads it on the GPU if it runs
+    /// on a server.
+    pub(crate) fn into_local_model(self) -> Result<Box<LlamaModel>> {
+        match self.runner {
+            Runner::Local(session) => Ok(session.into_inner().unwrap().into_model()),
+            Runner::Server { .. } => {
+                load_model(&hub::model_path(&local_model_spec())?, Device::Gpu)
+            }
+        }
     }
 
     /// Returns L2-normalized embeddings of documents, in order.
@@ -191,6 +203,11 @@ fn embed_locally(session: &mut Session, texts: &[String]) -> Result<Vec<Vec<f32>
         start = end;
     }
     Ok(embeddings)
+}
+
+/// Returns the GGUF path or Hugging Face repository of the in-process model.
+fn local_model_spec() -> String {
+    env::var("NNGREP_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into())
 }
 
 /// Returns the canonical name of the first model served at url.

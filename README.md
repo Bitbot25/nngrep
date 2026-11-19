@@ -104,10 +104,12 @@ anything was found, 1 if nothing was and 2 if an error occurred.
 ### Reranking
 
 With `--rerank`, nngrep takes the best chunks by cosine similarity, adds the
-best chunks by keyword search, and ranks them all again with
-[Qwen3-Reranker-4B](https://huggingface.co/Qwen/Qwen3-Reranker-4B), which reads
-each chunk together with the query. Scores are then the reranker's estimate that
-a chunk is what the query asks for, from 0 to 1.
+best chunks by keyword search, and ranks them all again with a reranker, which
+reads each chunk together with the query. The reranker is the embedding model
+with an adapter that approximates
+[Qwen3-Reranker-4B](https://huggingface.co/Qwen/Qwen3-Reranker-4B). Scores are
+then the reranker's estimate that a chunk is what the query asks for, from 0
+to 1.
 
 The keyword search ranks chunks by [BM25](https://en.wikipedia.org/wiki/Okapi_BM25),
 matching stemmed English words, the parts of `camelCase` and `snake_case`
@@ -115,15 +117,13 @@ identifiers, and whole identifiers. It finds chunks that the embedding misses,
 such as those with an exact error message or function name. It reads every file
 searched, which takes about 0.15 seconds per 100,000 chunks on 16 threads.
 
-The reranker runs in process, after the embedding model has been unloaded. On
-first use it downloads `Voodisss/Qwen3-Reranker-4B-GGUF-llama_cpp:Q4_0` (about
-2.4 GB), a llama.cpp conversion of Qwen's model, since Qwen publishes none; the
-`Q8_0` file is twice the size but ranks no better. The reranker uses about 3 GB
-of GPU memory and, with the default `--rerank-depth`, adds about 3 seconds to a
-search on an RX 7900 XT. Its time grows with the number of chunks reranked,
-and on slower GPUs that dominates. On those,
-`NNGREP_RERANK_MODEL=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF` needs about an
-eighth of the computation, but ranks less well.
+The reranker runs in process, on the embedding model if that runs in process
+too, and otherwise on a copy of it loaded from `NNGREP_MODEL` (by default
+`Qwen/Qwen3-Embedding-4B-GGUF:Q8_0`) on the GPU. The adapter is not downloaded:
+set `NNGREP_RERANK_ADAPTER` to its GGUF file. With the default
+`--rerank-depth`, reranking adds about 2 seconds to a search on an RX 7900 XT,
+and the model with the adapter uses about 5 GB of GPU memory, less than
+embedding the query does.
 
 ## Emacs
 
@@ -147,7 +147,7 @@ step through the results from any buffer. `C-h m` lists every key.
 | --------------------- | ------------------------------------------------------------------ |
 | `NNGREP_SERVER`       | URL of the embedding server (default `http://127.0.0.1:8000`)      |
 | `NNGREP_MODEL`        | GGUF path or Hugging Face `REPO[:QUANT]` for the in-process model  |
-| `NNGREP_RERANK_MODEL` | Same, for the Qwen3 reranker                                       |
+| `NNGREP_RERANK_ADAPTER` | GGUF path of the reranker's adapter (see [Reranking](#reranking)) |
 | `HF_HOME`, `HF_TOKEN` | Hugging Face cache directory (default `~/.cache/huggingface`) and access token |
 
 The index records the model it was built with, ignoring quantization and file

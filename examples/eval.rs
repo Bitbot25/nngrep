@@ -17,7 +17,6 @@ use nngrep::bm25::Bm25;
 use nngrep::chunk::{MAX_BYTES, truncate};
 use nngrep::embed::Embedder;
 use nngrep::index::{ChunkSpan, Index};
-use nngrep::llama::Device;
 use nngrep::rerank::Reranker;
 use std::collections::BTreeSet;
 use std::env;
@@ -75,7 +74,6 @@ fn main() -> Result<()> {
         .iter()
         .map(|q| embedder.embed_query(&q.text))
         .collect::<Result<_>>()?;
-    drop(embedder);
 
     let mut chunk_vectors = vec![0f32; index.vectors.len()];
     index.vectors.convert_to_f32_slice(&mut chunk_vectors);
@@ -85,11 +83,7 @@ fn main() -> Result<()> {
     let counts: Vec<_> = chunks.iter().map(|c| counter.count(&c.text)).collect();
     let bm25_scores = bm25.scores(&counts);
 
-    let mut reranker = if rerank {
-        Some(Reranker::load(Device::Gpu)?)
-    } else {
-        None
-    };
+    let mut reranker = rerank.then(|| Reranker::new(embedder)).transpose()?;
 
     let mut ranks: [Vec<Option<usize>>; 3] = Default::default();
     println!("{:>5} {:>5} {:>6}  query", "cos", "bm25", "rerank");

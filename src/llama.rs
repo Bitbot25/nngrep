@@ -26,20 +26,16 @@ pub(crate) struct Session {
 impl Session {
     /// Loads the GGUF model at path and creates a context with params.
     pub fn load(path: &Path, device: Device, params: LlamaContextParams) -> Result<Self> {
-        let backend = backend();
-        let model_params = match device {
-            Device::Gpu => LlamaModelParams::default().with_n_gpu_layers(999),
-            Device::Cpu => LlamaModelParams::default().with_devices(&[])?,
-        };
-        let model = LlamaModel::load_from_file(backend, path, &model_params)
-            .with_context(|| format!("loading {}", path.display()))?;
-        let model = Box::new(model);
+        Self::new(load_model(path, device)?, params)
+    }
 
+    /// Creates a context with params for the model.
+    pub fn new(model: Box<LlamaModel>, params: LlamaContextParams) -> Result<Self> {
         let threads = thread::available_parallelism().map_or(4, |n| n.get() as i32);
         let params = params.with_n_threads(threads).with_n_threads_batch(threads);
         let ctx = model
-            .new_context(backend, params)
-            .with_context(|| format!("creating a context for {}", path.display()))?;
+            .new_context(backend(), params)
+            .context("creating a llama.cpp context")?;
         // SAFETY: The model is boxed, so it stays in place when the session
         // moves, and it outlives the context, which is dropped first.
         let ctx = unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) };
@@ -50,6 +46,24 @@ impl Session {
     pub fn parts(&mut self) -> (&LlamaModel, &mut LlamaContext<'static>) {
         (&self.model, &mut self.ctx)
     }
+
+    /// Frees the context and returns the model.
+    pub fn into_model(self) -> Box<LlamaModel> {
+        let Session { ctx, model } = self;
+        drop(ctx);
+        model
+    }
+}
+
+/// Loads the GGUF model at path on the device.
+pub(crate) fn load_model(path: &Path, device: Device) -> Result<Box<LlamaModel>> {
+    let model_params = match device {
+        Device::Gpu => LlamaModelParams::default().with_n_gpu_layers(999),
+        Device::Cpu => LlamaModelParams::default().with_devices(&[])?,
+    };
+    let model = LlamaModel::load_from_file(backend(), path, &model_params)
+        .with_context(|| format!("loading {}", path.display()))?;
+    Ok(Box::new(model))
 }
 
 /// Returns the llama.cpp backend, initializing it on first use.
