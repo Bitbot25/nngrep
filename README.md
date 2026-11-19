@@ -152,9 +152,17 @@ searched, which takes about 0.15 seconds per 100,000 chunks on 16 threads.
 nngrepd loads the reranker on first use. It runs on nngrepd's embedding model
 if that runs with llama.cpp, and otherwise on a copy of it loaded from
 `NNGREP_MODEL` (by default `Qwen/Qwen3-Embedding-4B-GGUF:Q8_0`) on the GPU. The
-adapter is not downloaded: set `NNGREP_RERANK_ADAPTER` to its GGUF file before
-nngrepd starts. With the default `--rerank-depth`, a search with `--rerank`
-takes about 1.5 seconds on an RX 7900 XT.
+adapter is not downloaded: get it from the
+[reranker-v1 release](https://github.com/Bitbot25/nngrep/releases/tag/reranker-v1)
+and set `NNGREP_RERANK_ADAPTER` to its path before nngrepd starts:
+
+```sh
+curl -LO https://github.com/Bitbot25/nngrep/releases/download/reranker-v1/nngrep-reranker-r128.gguf
+export NNGREP_RERANK_ADAPTER=$PWD/nngrep-reranker-r128.gguf
+```
+
+With the default `--rerank-depth`, a search with `--rerank` takes about 1.5
+seconds on an RX 7900 XT.
 
 ## Emacs
 
