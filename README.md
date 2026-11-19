@@ -97,7 +97,7 @@ log. `nngrepd status` shows the model and the state of each index, and
 `nngrepd stop` stops it once the index being updated is saved, as do SIGINT and
 SIGTERM. Restart nngrepd after changing its configuration or upgrading.
 
-nngrepd uses about 5.3 GB of GPU memory, and 5.7 GB once the reranker is loaded.
+nngrepd uses about 4.8 GB of GPU memory, and 5.5 GB once the reranker is loaded.
 
 ## nngrep
 

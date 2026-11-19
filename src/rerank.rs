@@ -19,8 +19,8 @@ const INSTRUCT: &str = "Given a search query about a codebase, judge whether the
 /// Maximum number of tokens in the prompt before a document
 const MAX_PREFIX_TOKENS: usize = CONTEXT_TOKENS - BATCH_TOKENS;
 
-/// Maximum number of documents decoded at once
-const BATCH_SEQS: usize = 16;
+/// Maximum number of documents scored at once
+const BATCH_SEQS: usize = 32;
 const _: () = assert!(BATCH_SEQS < MAX_SEQS);
 
 /// A reranker that runs Qwen3-Embedding-4B with an adapter approximating
@@ -112,46 +112,78 @@ impl Reranker {
                 tokens
             })
             .collect();
+        let scores = self.score_tokens(ctx, &prefix, &documents);
+        ctx.set_embeddings(true);
+        scores
+    }
 
-        let mut tokens = LlamaBatch::new(BATCH_TOKENS, 1);
+    /// Returns the relevance of each document, given as tokens following the
+    /// prefix. Only the suffixes are decoded with outputs (embeddings), as
+    /// llama.cpp outputs every token of a batch decoded with them.
+    fn score_tokens(
+        &self,
+        ctx: &mut LlamaContext,
+        prefix: &[LlamaToken],
+        documents: &[Vec<LlamaToken>],
+    ) -> Result<Vec<f32>> {
+        let n_embd = self.head.len();
+        let n_suffix = self.suffix.len() / n_embd;
+        let mut tokens = LlamaBatch::new(BATCH_TOKENS, BATCH_SEQS as i32 + 1);
         let mut suffixes = LlamaBatch::new_embd(BATCH_SEQS * n_suffix, n_embd, 1);
-        ctx.clear_kv_cache_seq(None, None, None)?;
-        tokens.add_sequence(&prefix, 0, false)?;
-        ctx.decode(&mut tokens)?;
-
         let mut scores = Vec::with_capacity(documents.len());
         let mut start = 0;
         while start < documents.len() {
+            // As many documents as fit in the context after the prefix
+            let mut n_tokens = prefix.len();
             let mut end = start;
-            let mut n_tokens = 0;
             while end < documents.len()
                 && end - start < BATCH_SEQS
-                && n_tokens + documents[end].len() + n_suffix <= BATCH_TOKENS
+                && n_tokens + documents[end].len() + n_suffix <= CONTEXT_TOKENS
             {
                 n_tokens += documents[end].len() + n_suffix;
                 end += 1;
             }
+            let seqs: Vec<i32> = (1..=(end - start) as i32).collect();
 
+            ctx.set_embeddings(false);
             tokens.clear();
-            suffixes.clear();
-            ctx.clear_kv_cache_seq(None, Some(prefix.len() as u32), None)?;
-            for (i, doc) in documents[start..end].iter().enumerate() {
-                let seq = i as i32 + 1;
-                ctx.copy_kv_cache_seq(0, seq, None, None)?;
+            if start == 0 {
+                // The prefix belongs to sequence 0 and to every document's sequence
+                ctx.clear_kv_cache_seq(None, None, None)?;
+                let all: Vec<i32> = std::iter::once(0).chain(seqs.iter().copied()).collect();
+                for (pos, &token) in prefix.iter().enumerate() {
+                    tokens.add(token, pos as i32, &all, false)?;
+                }
+            } else {
+                ctx.clear_kv_cache_seq(None, Some(prefix.len() as u32), None)?;
+                for &seq in &seqs {
+                    ctx.copy_kv_cache_seq(0, seq, None, None)?;
+                }
+            }
+            for (doc, &seq) in documents[start..end].iter().zip(&seqs) {
                 for (j, &token) in doc.iter().enumerate() {
+                    if tokens.n_tokens() as usize == BATCH_TOKENS {
+                        ctx.decode(&mut tokens)?;
+                        tokens.clear();
+                    }
                     tokens.add(token, (prefix.len() + j) as i32, &[seq], false)?;
                 }
+            }
+            if tokens.n_tokens() > 0 {
+                ctx.decode(&mut tokens)?;
+            }
+
+            ctx.set_embeddings(true);
+            suffixes.clear();
+            for (doc, &seq) in documents[start..end].iter().zip(&seqs) {
                 for (j, embd) in self.suffix.chunks_exact(n_embd).enumerate() {
                     let pos = (prefix.len() + doc.len() + j) as i32;
                     suffixes.add_embd(embd, pos, &[seq], j == n_suffix - 1)?;
                 }
             }
-            ctx.decode(&mut tokens)?;
             ctx.decode(&mut suffixes)?;
-            for i in 0..end - start {
-                let output = ctx
-                    .embeddings_seq_ith(i as i32 + 1)
-                    .map_err(|e| anyhow!("{e}"))?;
+            for &seq in &seqs {
+                let output = ctx.embeddings_seq_ith(seq).map_err(|e| anyhow!("{e}"))?;
                 let logit: f32 = output.iter().zip(&self.head).map(|(a, b)| a * b).sum();
                 scores.push(1.0 / (1.0 + (-logit).exp()));
             }
