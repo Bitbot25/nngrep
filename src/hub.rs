@@ -1,6 +1,6 @@
 use crate::progress;
 use anyhow::{Context, Result, bail};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use serde::Deserialize;
 use std::env;
 use std::ffi::OsString;
@@ -98,15 +98,11 @@ fn download(repo: &str, quant: Option<&str>, dir: &Path) -> Result<PathBuf> {
         let len = response
             .header("Content-Length")
             .and_then(|n| n.parse().ok());
-        let bar = progress::bars().add(
-            ProgressBar::new(len.unwrap_or(0)).with_style(
-                ProgressStyle::with_template(
-                    "Downloading {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} · ETA {eta}",
-                )
-                .unwrap()
-                .progress_chars("=> "),
+        let bar = progress::bars().add(ProgressBar::new(len.unwrap_or(0)).with_style(
+            progress::bar_style(
+                "Downloading {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} · ETA {avg_eta}",
             ),
-        );
+        ));
         bar.set_message(format!("{repo}/{name}"));
 
         let mut partial = OsString::from(&path);

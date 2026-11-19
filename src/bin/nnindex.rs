@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use indicatif::ProgressBar;
 use nngrep::ipc::{Client, Progress, Request, Response};
-use nngrep::progress::spinner;
+use nngrep::progress::{bar_style, spinner};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -106,16 +106,9 @@ fn main() -> Result<()> {
 }
 
 fn embedding_bar(total: usize) -> ProgressBar {
-    let bar = ProgressBar::new(total as u64).with_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} chunks ({percent}%) · {speed} · ETA {eta} {wide_msg:.dim}",
-        )
-        .unwrap()
-        .with_key("speed", |s: &ProgressState, w: &mut dyn std::fmt::Write| {
-            write!(w, "{:.1} chunks/s", s.per_sec()).unwrap()
-        })
-        .progress_chars("=> "),
-    );
+    let bar = ProgressBar::new(total as u64).with_style(bar_style(
+        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} chunks ({percent}%) · {avg_per_sec} chunks/s · ETA {avg_eta} {wide_msg:.dim}",
+    ));
     bar.enable_steady_tick(Duration::from_millis(100));
     bar
 }
